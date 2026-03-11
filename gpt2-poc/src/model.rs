@@ -158,7 +158,7 @@ pub fn build_model(
 
 fn topk_softmax_dense(scores: &Tensor, top_k: usize) -> Result<Tensor> {
     let device = scores.device().clone();
-    let values = scores.to_vec2::<f32>()?;
+    let values = scores.to_dtype(DType::F32)?.to_vec2::<f32>()?;
     let num_operators = values
         .first()
         .map(|row| row.len())
