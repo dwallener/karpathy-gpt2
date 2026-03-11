@@ -1,52 +1,66 @@
+use std::fs::File;
+use std::io::Write;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use reqwest::blocking::Client;
+use serde::{Deserialize, Serialize};
 
-use crate::eval::{EvalExample, download_to_cache, read_jsonl};
+use crate::eval::{EvalExample, read_jsonl};
 
 const DATASET_DIR: &str = "arc_easy";
-const DATASET_FILE: &str = "ARC-Easy-Dev.jsonl";
-const URLS: &[&str] = &[
-    "https://raw.githubusercontent.com/allenai/ARC-Solvers/master/Arc-Solvers/Data/ARC-V1-Feb2018-2/ARC-Easy/ARC-Easy-Dev.jsonl",
-];
+const CACHE_FILE: &str = "validation.jsonl";
+const ROWS_URL: &str =
+    "https://datasets-server.huggingface.co/rows?dataset=allenai/ai2_arc&config=ARC-Easy&split=validation";
+const PAGE_SIZE: usize = 100;
 
 #[derive(Debug, Deserialize)]
+struct RowsResponse {
+    rows: Vec<RowEnvelope>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RowEnvelope {
+    row: ArcRow,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 struct ArcRow {
-    question: ArcQuestion,
+    question: String,
+    choices: ArcChoices,
     #[serde(rename = "answerKey")]
     answer_key: String,
 }
 
-#[derive(Debug, Deserialize)]
-struct ArcQuestion {
-    stem: String,
-    choices: Vec<ArcChoice>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ArcChoice {
-    label: String,
-    text: String,
+#[derive(Debug, Deserialize, Serialize)]
+struct ArcChoices {
+    label: Vec<String>,
+    text: Vec<String>,
 }
 
 pub fn load_examples(root: &Path) -> Result<Vec<EvalExample>> {
-    let path = root.join(DATASET_DIR).join(DATASET_FILE);
-    download_to_cache(&path, URLS)?;
-    let rows = read_jsonl::<ArcRow>(&path)?;
+    let path = root.join(DATASET_DIR).join(CACHE_FILE);
+    if !path.exists() {
+        download_validation_jsonl(&path)?;
+    }
 
-    let mut examples = Vec::new();
+    let rows = read_jsonl::<ArcRow>(&path)?;
+    let mut examples = Vec::with_capacity(rows.len());
     for row in rows {
+        if row.choices.label.len() < 4 || row.choices.text.len() < 4 {
+            continue;
+        }
+
         let mut ordered = vec![String::new(), String::new(), String::new(), String::new()];
-        for choice in row.question.choices {
-            let slot = match choice.label.as_str() {
+        for (label, text) in row.choices.label.into_iter().zip(row.choices.text) {
+            let slot = match label.as_str() {
                 "A" | "1" => 0,
                 "B" | "2" => 1,
                 "C" | "3" => 2,
                 "D" | "4" => 3,
                 _ => continue,
             };
-            ordered[slot] = choice.text;
+            ordered[slot] = text;
         }
         if ordered.iter().any(|text| text.is_empty()) {
             continue;
@@ -59,16 +73,15 @@ pub fn load_examples(root: &Path) -> Result<Vec<EvalExample>> {
             "D" | "4" => 3,
             other => {
                 return Err(anyhow::anyhow!(
-                    "unsupported ARC-Easy answer key '{}' in {}",
-                    other,
-                    path.display()
+                    "unsupported ARC-Easy answer key '{}'",
+                    other
                 ));
             }
         };
 
         let prompt = format!(
             "Question: {}\n\nA) {}\nB) {}\nC) {}\nD) {}\n\nAnswer:",
-            row.question.stem, ordered[0], ordered[1], ordered[2], ordered[3]
+            row.question, ordered[0], ordered[1], ordered[2], ordered[3]
         );
         examples.push(EvalExample {
             prompt,
@@ -77,8 +90,41 @@ pub fn load_examples(root: &Path) -> Result<Vec<EvalExample>> {
         });
     }
 
-    examples
-        .first()
-        .context("ARC-Easy loader produced zero valid examples")?;
+    if examples.is_empty() {
+        return Err(anyhow::anyhow!(
+            "ARC-Easy loader produced zero valid examples from {}",
+            path.display()
+        ));
+    }
     Ok(examples)
+}
+
+fn download_validation_jsonl(path: &Path) -> Result<()> {
+    let parent = path
+        .parent()
+        .context("ARC-Easy cache path must have a parent directory")?;
+    std::fs::create_dir_all(parent)?;
+
+    let client = Client::builder().build()?;
+    let mut file = File::create(path)?;
+    let mut offset = 0usize;
+    loop {
+        let response = client
+            .get(format!("{ROWS_URL}&offset={offset}&length={PAGE_SIZE}"))
+            .send()?
+            .error_for_status()?;
+        let body: RowsResponse = response.json()?;
+        if body.rows.is_empty() {
+            break;
+        }
+
+        for row in body.rows {
+            serde_json::to_writer(&mut file, &row.row)?;
+            file.write_all(b"\n")?;
+        }
+
+        offset += PAGE_SIZE;
+    }
+
+    Ok(())
 }
