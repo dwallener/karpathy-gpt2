@@ -15,7 +15,23 @@ const URLS: &[&str] = &[
 struct HellaSwagRow {
     ctx: String,
     endings: Vec<String>,
-    label: String,
+    label: LabelValue,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum LabelValue {
+    String(String),
+    Integer(usize),
+}
+
+impl LabelValue {
+    fn as_index(&self) -> Result<usize> {
+        match self {
+            Self::String(value) => Ok(value.parse::<usize>()?),
+            Self::Integer(value) => Ok(*value),
+        }
+    }
 }
 
 pub fn load_examples(root: &Path) -> Result<Vec<EvalExample>> {
@@ -24,11 +40,11 @@ pub fn load_examples(root: &Path) -> Result<Vec<EvalExample>> {
     let rows = read_jsonl::<HellaSwagRow>(&path)?;
     let mut examples = Vec::with_capacity(rows.len());
     for row in rows {
+        let correct_index = row.label.as_index()?;
         let prompt = format!(
             "Context: {}\n\nA) {}\nB) {}\nC) {}\nD) {}\n\nAnswer:",
             row.ctx, row.endings[0], row.endings[1], row.endings[2], row.endings[3]
         );
-        let correct_index = row.label.parse::<usize>()?;
         examples.push(EvalExample {
             prompt,
             choices: vec![" A".into(), " B".into(), " C".into(), " D".into()],
