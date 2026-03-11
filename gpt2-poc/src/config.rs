@@ -32,6 +32,7 @@ pub struct TrainConfig {
     pub seq_len: usize,
     pub batch_size: usize,
     pub tokenizer_workers: usize,
+    pub model_dtype: String,
     pub steps: usize,
     pub lr: f64,
     pub weight_decay: f64,

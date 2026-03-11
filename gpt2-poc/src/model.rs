@@ -31,6 +31,7 @@ impl Operator {
 
 pub struct OperatorStateLM {
     config: Config,
+    dtype: DType,
     token_embedding: Embedding,
     router_norm: LayerNorm,
     router_proj: Linear,
@@ -42,7 +43,7 @@ pub struct OperatorStateLM {
 }
 
 impl OperatorStateLM {
-    pub fn new(vb: VarBuilder<'_>, config: Config) -> Result<Self> {
+    pub fn new(vb: VarBuilder<'_>, config: Config, dtype: DType) -> Result<Self> {
         if config.top_k == 0 || config.top_k > config.num_operators {
             bail!(
                 "top_k must be in [1, num_operators], got {} with {} operators",
@@ -89,6 +90,7 @@ impl OperatorStateLM {
 
         Ok(Self {
             config,
+            dtype,
             token_embedding,
             router_norm,
             router_proj,
@@ -102,7 +104,7 @@ impl OperatorStateLM {
 
     pub fn forward(&self, xs: &Tensor) -> Result<(Tensor, Tensor)> {
         let (batch_size, seq_len) = xs.dims2()?;
-        let mut state = Tensor::zeros((batch_size, self.config.d_state), DType::F32, xs.device())?;
+        let mut state = Tensor::zeros((batch_size, self.config.d_state), self.dtype, xs.device())?;
         let embeddings = self.token_embedding.forward(xs)?;
         let mut logits_steps = Vec::with_capacity(seq_len);
 
@@ -114,7 +116,7 @@ impl OperatorStateLM {
             let routing = topk_softmax_dense(&router_scores, self.config.top_k)?;
 
             let mut mixed =
-                Tensor::zeros((batch_size, self.config.d_state), DType::F32, xs.device())?;
+                Tensor::zeros((batch_size, self.config.d_state), self.dtype, xs.device())?;
             for (idx, operator) in self.operators.iter().enumerate() {
                 let op_out = operator.forward(&router_input)?;
                 let gate = routing.i((.., idx))?.unsqueeze(1)?;
@@ -143,10 +145,14 @@ impl OperatorStateLM {
     }
 }
 
-pub fn build_model(config: Config, device: &Device) -> Result<(VarMap, OperatorStateLM)> {
+pub fn build_model(
+    config: Config,
+    dtype: DType,
+    device: &Device,
+) -> Result<(VarMap, OperatorStateLM)> {
     let varmap = VarMap::new();
-    let vb = VarBuilder::from_varmap(&varmap, DType::F32, device);
-    let model = OperatorStateLM::new(vb, config)?;
+    let vb = VarBuilder::from_varmap(&varmap, dtype, device);
+    let model = OperatorStateLM::new(vb, config, dtype)?;
     Ok((varmap, model))
 }
 
@@ -176,16 +182,15 @@ fn topk_softmax_dense(scores: &Tensor, top_k: usize) -> Result<Tensor> {
         }
     }
 
-    Ok(Tensor::from_vec(
-        dense,
-        (values.len(), num_operators),
-        &device,
-    )?)
+    Ok(
+        Tensor::from_vec(dense, (values.len(), num_operators), &device)?
+            .to_dtype(scores.dtype())?,
+    )
 }
 
 pub fn cross_entropy_loss(logits: &Tensor, targets: &Tensor) -> Result<Tensor> {
     let (_, _, vocab_size) = logits.dims3()?;
-    let flat_logits = logits.reshape(((), vocab_size))?;
+    let flat_logits = logits.reshape(((), vocab_size))?.to_dtype(DType::F32)?;
     let flat_targets = targets.flatten_all()?;
     Ok(nn::loss::cross_entropy(&flat_logits, &flat_targets)?)
 }

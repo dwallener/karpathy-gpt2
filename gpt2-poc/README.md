@@ -39,6 +39,22 @@ CUDA build:
 cargo build --release --features cuda
 ```
 
+## Precision
+
+- CPU default: `f32`
+- CUDA default: `bf16`
+- override with `--model-dtype f32|bf16|f16`
+
+Example:
+
+```bash
+cargo run --release --features cuda -- train \
+  --shard-dir ../data/fineweb \
+  --device cuda \
+  --model-dtype bf16 \
+  --out-dir runs/train_cuda
+```
+
 ## Smoke Test
 
 Inspect a sampled batch first:
@@ -69,21 +85,26 @@ cargo run --release -- train \
   --out-dir runs/smoke_cpu
 ```
 
-Example CUDA command:
+Example CUDA command that fits, barely, on an 8 GB RTX 4060:
 
 ```bash
 cargo run --release --features cuda -- train \
-  --shard-dir data/fineweb \
+  --shard-dir ../data/fineweb \
   --device cuda \
-  --seq-len 256 \
-  --batch-size 8 \
-  --tokenizer-workers 8 \
-  --steps 1000 \
-  --lr 3e-4 \
-  --weight-decay 0.01 \
-  --eval-every 100 \
-  --save-every 500 \
-  --out-dir runs/train_cuda
+  --model-dtype bf16 \
+  --seq-len 128 \
+  --batch-size 4 \
+  --tokenizer-workers 2 \
+  --steps 2 \
+  --eval-every 1 \
+  --save-every 2 \
+  --max-docs 50 \
+  --d-model 384 \
+  --d-state 1536 \
+  --num-operators 8 \
+  --operator-hidden 1536 \
+  --top-k 4 \
+  --out-dir runs/smoke_cuda_small
 ```
 
 Example CPU command:
@@ -114,6 +135,8 @@ cargo run --release -- train \
 ## Notes / TODOs
 
 - Top-k routing is currently implemented by copying router scores to host, selecting top-`k`, and rebuilding dense gates. This keeps the implementation explicit and simple but is not optimized.
+- The default architecture is too large for an 8 GB RTX 4060 with the current dense operator execution path. Use the smaller CUDA example above as the starting point on that class of GPU.
+- Mixed precision is now supported via `--model-dtype`. CUDA defaults to `bf16`, CPU defaults to `f32`.
 - Checkpoints currently store model weights and run metadata. Optimizer state resume is not implemented yet.
 - Validation uses the last 2 shards in deterministic shard order.
 - The GPT-2 tokenizer is loaded via `Tokenizer::from_pretrained("gpt2", None)`, so first use needs access to the tokenizer assets.

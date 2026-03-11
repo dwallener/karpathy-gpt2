@@ -20,6 +20,23 @@ enum DeviceArg {
     Cuda,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ModelDTypeArg {
+    F32,
+    Bf16,
+    F16,
+}
+
+impl ModelDTypeArg {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::F32 => "f32",
+            Self::Bf16 => "bf16",
+            Self::F16 => "f16",
+        }
+    }
+}
+
 #[derive(Debug, Parser)]
 #[command(
     author,
@@ -50,6 +67,8 @@ struct DataArgs {
     batch_size: usize,
     #[arg(long, default_value_t = default_tokenizer_workers())]
     tokenizer_workers: usize,
+    #[arg(long, value_enum)]
+    model_dtype: Option<ModelDTypeArg>,
     #[arg(long)]
     max_docs: Option<usize>,
 }
@@ -128,6 +147,12 @@ impl TrainArgs {
             seq_len: self.data.seq_len,
             batch_size: self.data.batch_size,
             tokenizer_workers: self.data.tokenizer_workers,
+            model_dtype: self
+                .data
+                .model_dtype
+                .map(ModelDTypeArg::as_str)
+                .unwrap_or("auto")
+                .to_string(),
             steps: self.steps,
             lr: self.lr,
             weight_decay: self.weight_decay,
@@ -161,6 +186,11 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Commands::Train(args) => {
+            let device = utils::resolve_device(matches!(args.data.device, DeviceArg::Cuda))?;
+            let model_dtype = utils::resolve_model_dtype(
+                &device,
+                args.data.model_dtype.map(ModelDTypeArg::as_str),
+            )?;
             let shards = list_shards(&args.data.shard_dir)?;
             let vocab_size = StreamDataset::tokenizer_vocab_size()?;
             let (train_shards, val_shards) = DatasetSplit::train_val_split(shards)?;
@@ -185,12 +215,18 @@ fn main() -> Result<()> {
             train_main(
                 args.model_config(vocab_size),
                 args.train_config(),
+                model_dtype,
                 train_ds,
                 val_ds,
-                &utils::resolve_device(matches!(args.data.device, DeviceArg::Cuda))?,
+                &device,
             )
         }
         Commands::Eval(args) => {
+            let device = utils::resolve_device(matches!(args.data.device, DeviceArg::Cuda))?;
+            let model_dtype = utils::resolve_model_dtype(
+                &device,
+                args.data.model_dtype.map(ModelDTypeArg::as_str),
+            )?;
             let shards = list_shards(&args.data.shard_dir)?;
             let vocab_size = StreamDataset::tokenizer_vocab_size()?;
             let (train_shards, val_shards) = DatasetSplit::train_val_split(shards)?;
@@ -214,13 +250,14 @@ fn main() -> Result<()> {
             )?;
             eval_main(
                 args.model_config(vocab_size),
+                model_dtype,
                 &args.checkpoint,
                 train_ds,
                 val_ds,
                 args.data.seq_len,
                 args.data.batch_size,
                 args.val_batches,
-                &utils::resolve_device(matches!(args.data.device, DeviceArg::Cuda))?,
+                &device,
             )
         }
         Commands::InspectBatch(args) => {

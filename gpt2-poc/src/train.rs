@@ -4,7 +4,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
-use candle_core::Device;
+use candle_core::{DType, Device};
 use candle_nn::{AdamW, Optimizer, ParamsAdamW};
 use indicatif::{ProgressBar, ProgressStyle};
 
@@ -16,6 +16,7 @@ use crate::utils::{format_float, write_json_pretty};
 pub fn train_main(
     model_config: Config,
     train_config: TrainConfig,
+    model_dtype: DType,
     mut train_ds: StreamDataset,
     mut val_ds: StreamDataset,
     device: &Device,
@@ -24,7 +25,7 @@ pub fn train_main(
     fs::create_dir_all(train_config.out_dir.join("checkpoints"))?;
     fs::create_dir_all(train_config.out_dir.join("logs"))?;
 
-    let (mut varmap, model) = build_model(model_config.clone(), device)?;
+    let (mut varmap, model) = build_model(model_config.clone(), model_dtype, device)?;
     let mut start_step = 0usize;
     if let Some(checkpoint) = &train_config.checkpoint {
         load_checkpoint(checkpoint, &mut varmap)?;
@@ -136,6 +137,7 @@ pub fn train_main(
 
 pub fn eval_main(
     model_config: Config,
+    model_dtype: DType,
     checkpoint: &Path,
     mut train_ds: StreamDataset,
     mut val_ds: StreamDataset,
@@ -144,7 +146,7 @@ pub fn eval_main(
     val_batches: usize,
     device: &Device,
 ) -> Result<()> {
-    let (mut varmap, model) = build_model(model_config, device)?;
+    let (mut varmap, model) = build_model(model_config, model_dtype, device)?;
     load_checkpoint(checkpoint, &mut varmap)?;
 
     let dataset = if val_ds.shard_count() > 0 {
