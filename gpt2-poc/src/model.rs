@@ -10,6 +10,12 @@ struct Operator {
     down: Linear,
 }
 
+#[derive(Debug, Clone)]
+struct SparseRoute {
+    row_indices: Vec<u32>,
+    gate_values: Vec<f32>,
+}
+
 impl Operator {
     fn new(
         vb: VarBuilder<'_>,
@@ -113,14 +119,31 @@ impl OperatorStateLM {
             let router_input = Tensor::cat(&[&e_t, &state], 1)?;
             let router_hidden = self.router_norm.forward(&router_input)?;
             let router_scores = self.router_proj.forward(&router_hidden)?;
-            let routing = topk_softmax_dense(&router_scores, self.config.top_k)?;
+            let routing =
+                topk_routes(&router_scores, self.config.top_k, self.config.num_operators)?;
 
             let mut mixed =
                 Tensor::zeros((batch_size, self.config.d_state), self.dtype, xs.device())?;
             for (idx, operator) in self.operators.iter().enumerate() {
-                let op_out = operator.forward(&router_input)?;
-                let gate = routing.i((.., idx))?.unsqueeze(1)?;
-                mixed = mixed.broadcast_add(&op_out.broadcast_mul(&gate)?)?;
+                let route = &routing[idx];
+                if route.row_indices.is_empty() {
+                    continue;
+                }
+                let row_indices = Tensor::from_vec(
+                    route.row_indices.clone(),
+                    route.row_indices.len(),
+                    xs.device(),
+                )?;
+                let op_input = router_input.index_select(&row_indices, 0)?;
+                let op_out = operator.forward(&op_input)?;
+                let gate = Tensor::from_vec(
+                    route.gate_values.clone(),
+                    (route.gate_values.len(), 1),
+                    xs.device(),
+                )?
+                .to_dtype(self.dtype)?;
+                let weighted = op_out.broadcast_mul(&gate)?;
+                mixed = mixed.index_add(&row_indices, &weighted, 0)?;
             }
 
             let gate_input = Tensor::cat(&[&state, &mixed, &e_t], 1)?;
@@ -156,14 +179,26 @@ pub fn build_model(
     Ok((varmap, model))
 }
 
-fn topk_softmax_dense(scores: &Tensor, top_k: usize) -> Result<Tensor> {
-    let device = scores.device().clone();
+fn topk_routes(scores: &Tensor, top_k: usize, num_operators: usize) -> Result<Vec<SparseRoute>> {
     let values = scores.to_dtype(DType::F32)?.to_vec2::<f32>()?;
-    let num_operators = values
+    let actual_num_operators = values
         .first()
         .map(|row| row.len())
         .ok_or_else(|| anyhow::anyhow!("router scores cannot be empty"))?;
-    let mut dense = vec![0f32; values.len() * num_operators];
+    if actual_num_operators != num_operators {
+        anyhow::bail!(
+            "router score width {} does not match configured operators {}",
+            actual_num_operators,
+            num_operators
+        );
+    }
+    let mut routes = vec![
+        SparseRoute {
+            row_indices: Vec::new(),
+            gate_values: Vec::new(),
+        };
+        num_operators
+    ];
 
     for (batch_idx, row) in values.iter().enumerate() {
         let mut ranked: Vec<(usize, f32)> = row.iter().copied().enumerate().collect();
@@ -178,14 +213,13 @@ fn topk_softmax_dense(scores: &Tensor, top_k: usize) -> Result<Tensor> {
             .map(|(_, score)| (*score - max_score).exp())
             .sum();
         for (op_idx, score) in active {
-            dense[batch_idx * num_operators + *op_idx] = (*score - max_score).exp() / denom;
+            routes[*op_idx].row_indices.push(batch_idx as u32);
+            routes[*op_idx]
+                .gate_values
+                .push((*score - max_score).exp() / denom);
         }
     }
-
-    Ok(
-        Tensor::from_vec(dense, (values.len(), num_operators), &device)?
-            .to_dtype(scores.dtype())?,
-    )
+    Ok(routes)
 }
 
 pub fn cross_entropy_loss(logits: &Tensor, targets: &Tensor) -> Result<Tensor> {
