@@ -51,8 +51,10 @@ pub fn train_main(
     let start_time = Instant::now();
     let mut running_tokens = 0usize;
     let mut running_docs = 0usize;
+    let mut train_compute_time = 0f64;
 
     for step in (start_step + 1)..=train_config.steps {
+        let batch_wait_start = Instant::now();
         let Some(batch) = train_ds.next_batch(device)? else {
             println!(
                 "stream dataset ended early at step={} max_docs={:?}",
@@ -61,37 +63,50 @@ pub fn train_main(
             );
             break;
         };
+        let batch_wait_ms = batch_wait_start.elapsed().as_secs_f64() * 1_000.0;
 
+        let step_start = Instant::now();
         let (logits, _) = model.forward(&batch.xs)?;
         let loss = cross_entropy_loss(&logits, &batch.ys)?;
 
         let mut grads = loss.backward()?;
         clip_gradients(&varmap, &mut grads, train_config.grad_clip)?;
         optimizer.step(&grads)?;
+        let step_time_ms = step_start.elapsed().as_secs_f64() * 1_000.0;
+        train_compute_time += step_time_ms / 1_000.0;
 
         let train_loss = loss.to_dtype(DType::F32)?.to_scalar::<f32>()? as f64;
         running_tokens += train_config.batch_size * train_config.seq_len;
         running_docs += batch.docs_consumed;
         let elapsed = start_time.elapsed().as_secs_f64().max(1e-9);
-        let tokens_per_sec = running_tokens as f64 / elapsed;
-        let docs_per_sec = running_docs as f64 / elapsed;
+        let train_elapsed = train_compute_time.max(1e-9);
+        let train_tokens_per_sec = running_tokens as f64 / train_elapsed;
+        let train_docs_per_sec = running_docs as f64 / train_elapsed;
 
         let mut val_loss = None;
+        let mut eval_time_ms = None;
         if step % train_config.eval_every == 0 {
+            let eval_start = Instant::now();
             let loss = evaluate_dataset(&model, &mut val_ds, train_config.val_batches, device)?;
             val_loss = Some(loss);
+            eval_time_ms = Some(eval_start.elapsed().as_secs_f64() * 1_000.0);
         }
 
         if step % train_config.log_every == 0 || val_loss.is_some() || step == 1 {
             println!(
-                "step={} train_loss={} val_loss={} tok/s={} docs/s={} tokenizer_q={} parquet_q={} current_shard={} elapsed_sec={}",
+                "step={} train_loss={} val_loss={} train_tok/s={} train_docs/s={} batch_wait_ms={} step_time_ms={} eval_time_ms={} tokenizer_q={} parquet_q={} current_shard={} elapsed_sec={}",
                 step,
                 format_float(train_loss),
                 val_loss
                     .map(format_float)
                     .unwrap_or_else(|| "na".to_string()),
-                format_float(tokens_per_sec),
-                format_float(docs_per_sec),
+                format_float(train_tokens_per_sec),
+                format_float(train_docs_per_sec),
+                format_float(batch_wait_ms),
+                format_float(step_time_ms),
+                eval_time_ms
+                    .map(format_float)
+                    .unwrap_or_else(|| "na".to_string()),
                 batch.tokenizer_queue_depth,
                 batch.parquet_queue_depth,
                 batch.current_shard,
@@ -102,8 +117,11 @@ pub fn train_main(
                 step,
                 train_loss,
                 val_loss,
-                tokens_per_sec,
-                docs_per_sec,
+                train_tokens_per_sec,
+                train_docs_per_sec,
+                batch_wait_ms,
+                step_time_ms,
+                eval_time_ms,
                 batch.tokenizer_queue_depth,
                 batch.parquet_queue_depth,
                 &batch.current_shard,
@@ -221,7 +239,7 @@ fn init_csv_log(path: &Path) -> Result<()> {
         let mut file = File::create(path)?;
         writeln!(
             file,
-            "step,train_loss,val_loss,tokens_per_sec,docs_per_sec,tokenizer_queue_depth,parquet_queue_depth,current_shard,elapsed_sec"
+            "step,train_loss,val_loss,train_tokens_per_sec,train_docs_per_sec,batch_wait_ms,step_time_ms,eval_time_ms,tokenizer_queue_depth,parquet_queue_depth,current_shard,elapsed_sec"
         )?;
         file.flush()?;
     }
@@ -233,8 +251,11 @@ fn append_csv_log(
     step: usize,
     train_loss: f64,
     val_loss: Option<f64>,
-    tokens_per_sec: f64,
-    docs_per_sec: f64,
+    train_tokens_per_sec: f64,
+    train_docs_per_sec: f64,
+    batch_wait_ms: f64,
+    step_time_ms: f64,
+    eval_time_ms: Option<f64>,
     tokenizer_queue_depth: usize,
     parquet_queue_depth: usize,
     current_shard: &str,
@@ -243,8 +264,9 @@ fn append_csv_log(
     let mut file = OpenOptions::new().append(true).open(path)?;
     writeln!(
         file,
-        "{step},{train_loss},{},{tokens_per_sec},{docs_per_sec},{tokenizer_queue_depth},{parquet_queue_depth},{current_shard},{elapsed_sec}",
+        "{step},{train_loss},{},{train_tokens_per_sec},{train_docs_per_sec},{batch_wait_ms},{step_time_ms},{},{tokenizer_queue_depth},{parquet_queue_depth},{current_shard},{elapsed_sec}",
         val_loss.map(|v| v.to_string()).unwrap_or_default(),
+        eval_time_ms.map(|v| v.to_string()).unwrap_or_default(),
     )?;
     Ok(())
 }
