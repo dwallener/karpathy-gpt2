@@ -356,22 +356,22 @@ impl ParquetReader {
             for &shard_idx in &shard_order {
                 let path = &self.shard_paths[shard_idx];
                 let current_shard = path.display().to_string();
-                for texts in read_text_groups_batched(path, self.max_docs, docs_seen)? {
+                docs_seen += stream_text_groups_batched(path, self.max_docs, docs_seen, |texts| {
                     if texts.is_empty() {
-                        continue;
+                        return Ok(true);
                     }
-                    docs_seen += texts.len();
                     let work = DocumentWork {
                         texts,
                         current_shard: current_shard.clone(),
                         parquet_queue_depth: doc_tx.len(),
                     };
                     if doc_tx.send(work).is_err() {
-                        return Ok(());
+                        return Ok(false);
                     }
-                    if self.max_docs.is_some_and(|limit| docs_seen >= limit) {
-                        return Ok(());
-                    }
+                    Ok(true)
+                })?;
+                if self.max_docs.is_some_and(|limit| docs_seen >= limit) {
+                    return Ok(());
                 }
             }
             if !self.reshuffle {
@@ -460,6 +460,45 @@ fn read_text_groups_batched(
         }
     }
     Ok(groups)
+}
+
+fn stream_text_groups_batched<F>(
+    path: &Path,
+    max_docs: Option<usize>,
+    docs_seen: usize,
+    mut on_group: F,
+) -> Result<usize>
+where
+    F: FnMut(Vec<String>) -> Result<bool>,
+{
+    let remaining = max_docs.map(|limit| limit.saturating_sub(docs_seen));
+    if remaining == Some(0) {
+        return Ok(0);
+    }
+
+    let file = File::open(path)
+        .with_context(|| format!("failed to open parquet shard {}", path.display()))?;
+    let reader =
+        polars::prelude::ParquetReader::new(file).with_columns(Some(vec![TEXT_COLUMN.to_string()]));
+    let reader = if let Some(limit) = remaining {
+        reader.with_n_rows(Some(limit))
+    } else {
+        reader
+    };
+    let mut reader = reader.batched(DEFAULT_ROW_GROUP_DOCS)?;
+    let mut emitted_docs = 0usize;
+
+    while let Some(dfs) = block_on(reader.next_batches(1))? {
+        for df in dfs {
+            let texts = extract_texts(df, path)?;
+            emitted_docs += texts.len();
+            if !on_group(texts)? {
+                return Ok(emitted_docs);
+            }
+        }
+    }
+
+    Ok(emitted_docs)
 }
 
 fn extract_texts(df: DataFrame, path: &Path) -> Result<Vec<String>> {
