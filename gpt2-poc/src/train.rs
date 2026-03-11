@@ -69,7 +69,7 @@ pub fn train_main(
         clip_gradients(&varmap, &mut grads, train_config.grad_clip)?;
         optimizer.step(&grads)?;
 
-        let train_loss = loss.to_scalar::<f32>()? as f64;
+        let train_loss = loss.to_dtype(DType::F32)?.to_scalar::<f32>()? as f64;
         running_tokens += train_config.batch_size * train_config.seq_len;
         running_docs += batch.docs_consumed;
         let elapsed = start_time.elapsed().as_secs_f64().max(1e-9);
@@ -207,7 +207,7 @@ fn evaluate_dataset(
         };
         let (logits, _) = model.forward(&batch.xs)?;
         let loss = cross_entropy_loss(&logits, &batch.ys)?;
-        total += loss.to_scalar::<f32>()? as f64;
+        total += loss.to_dtype(DType::F32)?.to_scalar::<f32>()? as f64;
         seen += 1;
     }
     if seen == 0 {
@@ -293,7 +293,11 @@ fn clip_gradients(
     let mut total_sq = 0f64;
     for var in &vars {
         if let Some(grad) = grads.get(var.as_tensor()) {
-            let grad_sq = grad.sqr()?.sum_all()?.to_scalar::<f32>()? as f64;
+            let grad_sq = grad
+                .sqr()?
+                .sum_all()?
+                .to_dtype(DType::F32)?
+                .to_scalar::<f32>()? as f64;
             total_sq += grad_sq;
         }
     }
