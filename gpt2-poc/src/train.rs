@@ -7,18 +7,17 @@ use anyhow::{Context, Result, bail};
 use candle_core::Device;
 use candle_nn::{AdamW, Optimizer, ParamsAdamW};
 use indicatif::{ProgressBar, ProgressStyle};
-use rand::{SeedableRng, rngs::StdRng};
 
 use crate::config::{CheckpointMeta, Config, TrainConfig};
-use crate::dataset::TokenDataset;
 use crate::model::{build_model, cross_entropy_loss};
+use crate::stream_dataset::StreamDataset;
 use crate::utils::{format_float, write_json_pretty};
 
 pub fn train_main(
     model_config: Config,
     train_config: TrainConfig,
-    train_ds: TokenDataset,
-    val_ds: Option<TokenDataset>,
+    mut train_ds: StreamDataset,
+    mut val_ds: StreamDataset,
     device: &Device,
 ) -> Result<()> {
     fs::create_dir_all(&train_config.out_dir)?;
@@ -48,17 +47,20 @@ pub fn train_main(
         "[{elapsed_precise}] {wide_bar} {pos}/{len} step={msg}",
     )?);
 
-    let mut rng = StdRng::seed_from_u64(42);
     let start_time = Instant::now();
     let mut running_tokens = 0usize;
+    let mut running_docs = 0usize;
 
     for step in (start_step + 1)..=train_config.steps {
-        let batch = train_ds.sample_batch(
-            train_config.batch_size,
-            train_config.seq_len,
-            &mut rng,
-            device,
-        )?;
+        let Some(batch) = train_ds.next_batch(device)? else {
+            println!(
+                "stream dataset ended early at step={} max_docs={:?}",
+                step - 1,
+                train_config.max_docs
+            );
+            break;
+        };
+
         let (logits, _) = model.forward(&batch.xs)?;
         let loss = cross_entropy_loss(&logits, &batch.ys)?;
 
@@ -68,32 +70,30 @@ pub fn train_main(
 
         let train_loss = loss.to_scalar::<f32>()? as f64;
         running_tokens += train_config.batch_size * train_config.seq_len;
+        running_docs += batch.docs_consumed;
         let elapsed = start_time.elapsed().as_secs_f64().max(1e-9);
         let tokens_per_sec = running_tokens as f64 / elapsed;
+        let docs_per_sec = running_docs as f64 / elapsed;
 
         let mut val_loss = None;
         if step % train_config.eval_every == 0 {
-            let eval_ds = val_ds.as_ref().unwrap_or(&train_ds);
-            let loss = evaluate_dataset(
-                &model,
-                eval_ds,
-                train_config.seq_len,
-                train_config.batch_size,
-                train_config.val_batches,
-                device,
-            )?;
+            let loss = evaluate_dataset(&model, &mut val_ds, train_config.val_batches, device)?;
             val_loss = Some(loss);
         }
 
         if step % train_config.log_every == 0 || val_loss.is_some() || step == 1 {
             println!(
-                "step={} train_loss={} val_loss={} tok/s={} elapsed_sec={}",
+                "step={} train_loss={} val_loss={} tok/s={} docs/s={} tokenizer_q={} parquet_q={} current_shard={} elapsed_sec={}",
                 step,
                 format_float(train_loss),
                 val_loss
                     .map(format_float)
                     .unwrap_or_else(|| "na".to_string()),
                 format_float(tokens_per_sec),
+                format_float(docs_per_sec),
+                batch.tokenizer_queue_depth,
+                batch.parquet_queue_depth,
+                batch.current_shard,
                 format_float(elapsed),
             );
             append_csv_log(
@@ -102,6 +102,10 @@ pub fn train_main(
                 train_loss,
                 val_loss,
                 tokens_per_sec,
+                docs_per_sec,
+                batch.tokenizer_queue_depth,
+                batch.parquet_queue_depth,
+                &batch.current_shard,
                 elapsed,
             )?;
         }
@@ -133,20 +137,27 @@ pub fn train_main(
 pub fn eval_main(
     model_config: Config,
     checkpoint: &Path,
-    train_ds: TokenDataset,
-    val_ds: Option<TokenDataset>,
-    seq_len: usize,
-    batch_size: usize,
+    mut train_ds: StreamDataset,
+    mut val_ds: StreamDataset,
+    _seq_len: usize,
+    _batch_size: usize,
     val_batches: usize,
     device: &Device,
 ) -> Result<()> {
     let (mut varmap, model) = build_model(model_config, device)?;
     load_checkpoint(checkpoint, &mut varmap)?;
-    let dataset = val_ds.as_ref().unwrap_or(&train_ds);
-    let loss = evaluate_dataset(&model, dataset, seq_len, batch_size, val_batches, device)?;
+
+    let dataset = if val_ds.shard_count() > 0 {
+        &mut val_ds
+    } else {
+        &mut train_ds
+    };
+    let loss = evaluate_dataset(&model, dataset, val_batches, device)?;
     println!(
-        "eval_dataset={} val_loss={} batches={}",
-        dataset.path().display(),
+        "eval_shard={} val_loss={} batches={}",
+        dataset
+            .current_shard_name()
+            .unwrap_or_else(|| "not-started".to_string()),
         format_float(loss),
         val_batches
     );
@@ -154,68 +165,63 @@ pub fn eval_main(
 }
 
 pub fn inspect_batch_main(
-    train_ds: TokenDataset,
-    val_ds: Option<TokenDataset>,
-    seq_len: usize,
-    batch_size: usize,
+    train_ds: &mut StreamDataset,
+    val_ds: &StreamDataset,
     device: &Device,
 ) -> Result<()> {
-    let mut rng = StdRng::seed_from_u64(7);
-    let batch = train_ds.sample_batch(batch_size, seq_len, &mut rng, device)?;
+    let batch = train_ds
+        .next_batch(device)?
+        .context("inspect-batch could not produce a batch")?;
     println!(
-        "train_path={} len_tokens={} max_token={} x_shape={:?} y_shape={:?}",
-        train_ds.path().display(),
-        train_ds.len_tokens(),
-        train_ds.max_token(),
+        "train_shards={} val_shards={} x_shape={:?} y_shape={:?}",
+        train_ds.shard_count(),
+        val_ds.shard_count(),
         batch.xs.dims(),
         batch.ys.dims(),
     );
-    println!("sample_starts={:?}", batch.starts);
-    println!(
-        "sample_x0={:?}",
-        train_ds.inspect_window(batch.starts[0], seq_len)?
-    );
-    println!(
-        "sample_y0={:?}",
-        train_ds.inspect_window(batch.starts[0] + 1, seq_len)?
-    );
-    if let Some(val_ds) = val_ds {
-        println!(
-            "val_path={} len_tokens={} max_token={}",
-            val_ds.path().display(),
-            val_ds.len_tokens(),
-            val_ds.max_token(),
-        );
-    }
+    println!("docs_consumed={}", batch.docs_consumed);
+    println!("tokenizer_queue_depth={}", batch.tokenizer_queue_depth);
+    println!("parquet_queue_depth={}", batch.parquet_queue_depth);
+    println!("current_shard={}", batch.current_shard);
+    println!("sample_x0={:?}", batch.xs.get(0)?.to_vec1::<u32>()?);
+    println!("sample_y0={:?}", batch.ys.get(0)?.to_vec1::<u32>()?);
     Ok(())
 }
 
 fn evaluate_dataset(
     model: &crate::model::OperatorStateLM,
-    dataset: &TokenDataset,
-    seq_len: usize,
-    batch_size: usize,
+    dataset: &mut StreamDataset,
     batches: usize,
     device: &Device,
 ) -> Result<f64> {
     if batches == 0 {
         bail!("val_batches must be >= 1");
     }
-    let mut rng = StdRng::seed_from_u64(1234);
     let mut total = 0f64;
+    let mut seen = 0usize;
     for _ in 0..batches {
-        let batch = dataset.sample_batch(batch_size, seq_len, &mut rng, device)?;
+        let Some(batch) = dataset.next_batch(device)? else {
+            break;
+        };
         let (logits, _) = model.forward(&batch.xs)?;
         let loss = cross_entropy_loss(&logits, &batch.ys)?;
         total += loss.to_scalar::<f32>()? as f64;
+        seen += 1;
     }
-    Ok(total / batches as f64)
+    if seen == 0 {
+        bail!("evaluation dataset produced zero batches")
+    }
+    Ok(total / seen as f64)
 }
 
 fn init_csv_log(path: &Path) -> Result<()> {
     if !path.exists() {
         let mut file = File::create(path)?;
-        writeln!(file, "step,train_loss,val_loss,tokens_per_sec,elapsed_sec")?;
+        writeln!(
+            file,
+            "step,train_loss,val_loss,tokens_per_sec,docs_per_sec,tokenizer_queue_depth,parquet_queue_depth,current_shard,elapsed_sec"
+        )?;
+        file.flush()?;
     }
     Ok(())
 }
@@ -226,12 +232,16 @@ fn append_csv_log(
     train_loss: f64,
     val_loss: Option<f64>,
     tokens_per_sec: f64,
+    docs_per_sec: f64,
+    tokenizer_queue_depth: usize,
+    parquet_queue_depth: usize,
+    current_shard: &str,
     elapsed_sec: f64,
 ) -> Result<()> {
     let mut file = OpenOptions::new().append(true).open(path)?;
     writeln!(
         file,
-        "{step},{train_loss},{},{tokens_per_sec},{elapsed_sec}",
+        "{step},{train_loss},{},{tokens_per_sec},{docs_per_sec},{tokenizer_queue_depth},{parquet_queue_depth},{current_shard},{elapsed_sec}",
         val_loss.map(|v| v.to_string()).unwrap_or_default(),
     )?;
     Ok(())

@@ -1,6 +1,7 @@
 mod config;
-mod dataset;
 mod model;
+mod stream_dataset;
+mod token_batcher;
 mod train;
 mod utils;
 
@@ -10,7 +11,7 @@ use anyhow::Result;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::config::{Config, TrainConfig};
-use crate::dataset::TokenDataset;
+use crate::stream_dataset::{DatasetSplit, StreamDataset, list_shards};
 use crate::train::{eval_main, inspect_batch_main, train_main};
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -40,17 +41,17 @@ enum Commands {
 #[derive(Debug, Clone, Args)]
 struct DataArgs {
     #[arg(long)]
-    train_tokens: PathBuf,
-    #[arg(long)]
-    val_tokens: Option<PathBuf>,
+    shard_dir: PathBuf,
     #[arg(long, value_enum, default_value = "cpu")]
     device: DeviceArg,
     #[arg(long, default_value_t = 128)]
     seq_len: usize,
     #[arg(long, default_value_t = 8)]
     batch_size: usize,
+    #[arg(long, default_value_t = default_tokenizer_workers())]
+    tokenizer_workers: usize,
     #[arg(long)]
-    vocab_size: Option<usize>,
+    max_docs: Option<usize>,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -109,22 +110,6 @@ struct EvalArgs {
     top_k: usize,
 }
 
-impl DataArgs {
-    fn dataset_paths(&self) -> Result<(TokenDataset, Option<TokenDataset>)> {
-        let train = TokenDataset::from_file(&self.train_tokens)?;
-        let val = match &self.val_tokens {
-            Some(path) => Some(TokenDataset::from_file(path)?),
-            None => None,
-        };
-        Ok((train, val))
-    }
-
-    fn resolve_vocab_size(&self, train: &TokenDataset, val: Option<&TokenDataset>) -> usize {
-        self.vocab_size
-            .unwrap_or_else(|| train.derived_vocab_size(val))
-    }
-}
-
 impl TrainArgs {
     fn model_config(&self, vocab_size: usize) -> Config {
         Config {
@@ -142,6 +127,7 @@ impl TrainArgs {
         TrainConfig {
             seq_len: self.data.seq_len,
             batch_size: self.data.batch_size,
+            tokenizer_workers: self.data.tokenizer_workers,
             steps: self.steps,
             lr: self.lr,
             weight_decay: self.weight_decay,
@@ -152,6 +138,7 @@ impl TrainArgs {
             grad_clip: self.grad_clip,
             out_dir: self.out_dir.clone(),
             checkpoint: self.checkpoint.clone(),
+            max_docs: self.data.max_docs,
         }
     }
 }
@@ -174,8 +161,27 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Commands::Train(args) => {
-            let (train_ds, val_ds) = args.data.dataset_paths()?;
-            let vocab_size = args.data.resolve_vocab_size(&train_ds, val_ds.as_ref());
+            let shards = list_shards(&args.data.shard_dir)?;
+            let vocab_size = StreamDataset::tokenizer_vocab_size()?;
+            let (train_shards, val_shards) = DatasetSplit::train_val_split(shards)?;
+            let train_ds = StreamDataset::new(
+                train_shards,
+                args.data.seq_len,
+                args.data.batch_size,
+                true,
+                args.data.max_docs,
+                args.data.tokenizer_workers,
+                true,
+            )?;
+            let val_ds = StreamDataset::new(
+                val_shards,
+                args.data.seq_len,
+                args.data.batch_size,
+                false,
+                args.data.max_docs,
+                1,
+                false,
+            )?;
             train_main(
                 args.model_config(vocab_size),
                 args.train_config(),
@@ -185,8 +191,27 @@ fn main() -> Result<()> {
             )
         }
         Commands::Eval(args) => {
-            let (train_ds, val_ds) = args.data.dataset_paths()?;
-            let vocab_size = args.data.resolve_vocab_size(&train_ds, val_ds.as_ref());
+            let shards = list_shards(&args.data.shard_dir)?;
+            let vocab_size = StreamDataset::tokenizer_vocab_size()?;
+            let (train_shards, val_shards) = DatasetSplit::train_val_split(shards)?;
+            let train_ds = StreamDataset::new(
+                train_shards,
+                args.data.seq_len,
+                args.data.batch_size,
+                false,
+                args.data.max_docs,
+                1,
+                false,
+            )?;
+            let val_ds = StreamDataset::new(
+                val_shards,
+                args.data.seq_len,
+                args.data.batch_size,
+                false,
+                args.data.max_docs,
+                1,
+                false,
+            )?;
             eval_main(
                 args.model_config(vocab_size),
                 &args.checkpoint,
@@ -199,14 +224,36 @@ fn main() -> Result<()> {
             )
         }
         Commands::InspectBatch(args) => {
-            let (train_ds, val_ds) = args.dataset_paths()?;
-            inspect_batch_main(
-                train_ds,
-                val_ds,
+            let shards = list_shards(&args.shard_dir)?;
+            let (train_shards, val_shards) = DatasetSplit::train_val_split(shards)?;
+            let mut train_ds = StreamDataset::new(
+                train_shards,
                 args.seq_len,
                 args.batch_size,
+                false,
+                args.max_docs,
+                args.tokenizer_workers,
+                true,
+            )?;
+            let val_ds = StreamDataset::new(
+                val_shards,
+                args.seq_len,
+                args.batch_size,
+                false,
+                args.max_docs,
+                1,
+                false,
+            )?;
+            inspect_batch_main(
+                &mut train_ds,
+                &val_ds,
                 &utils::resolve_device(matches!(args.device, DeviceArg::Cuda))?,
             )
         }
     }
+}
+
+fn default_tokenizer_workers() -> usize {
+    let cpus = num_cpus::get();
+    if cpus <= 1 { 1 } else { cpus / 2 }
 }

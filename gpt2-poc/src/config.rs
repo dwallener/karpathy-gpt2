@@ -31,6 +31,7 @@ impl Config {
 pub struct TrainConfig {
     pub seq_len: usize,
     pub batch_size: usize,
+    pub tokenizer_workers: usize,
     pub steps: usize,
     pub lr: f64,
     pub weight_decay: f64,
@@ -41,6 +42,7 @@ pub struct TrainConfig {
     pub grad_clip: f64,
     pub out_dir: PathBuf,
     pub checkpoint: Option<PathBuf>,
+    pub max_docs: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
