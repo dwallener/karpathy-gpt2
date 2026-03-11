@@ -1,18 +1,12 @@
-mod config;
-mod model;
-mod stream_dataset;
-mod token_batcher;
-mod train;
-mod utils;
-
 use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
-use crate::config::{Config, TrainConfig};
-use crate::stream_dataset::{DatasetSplit, StreamDataset, list_shards};
-use crate::train::{eval_main, inspect_batch_main, train_main};
+use gpt2_poc::config::{Config, TrainConfig};
+use gpt2_poc::stream_dataset::{DatasetSplit, StreamDataset, list_shards};
+use gpt2_poc::train::{eval_main, inspect_batch_main, train_main};
+use gpt2_poc::utils;
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum DeviceArg {
@@ -77,6 +71,10 @@ struct DataArgs {
 struct TrainArgs {
     #[command(flatten)]
     data: DataArgs,
+    #[arg(long)]
+    mini_core_every: Option<usize>,
+    #[arg(long)]
+    mini_core_limit: Option<usize>,
     #[arg(long, default_value_t = 1000)]
     steps: usize,
     #[arg(long, default_value_t = 3e-4)]
@@ -153,6 +151,8 @@ impl TrainArgs {
                 .map(ModelDTypeArg::as_str)
                 .unwrap_or("auto")
                 .to_string(),
+            mini_core_every: self.mini_core_every,
+            mini_core_limit: self.mini_core_limit,
             steps: self.steps,
             lr: self.lr,
             weight_decay: self.weight_decay,

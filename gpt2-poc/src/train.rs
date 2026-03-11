@@ -9,6 +9,7 @@ use candle_nn::{AdamW, Optimizer, ParamsAdamW};
 use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::config::{CheckpointMeta, Config, TrainConfig};
+use crate::eval::run_mini_core;
 use crate::model::{build_model, cross_entropy_loss};
 use crate::stream_dataset::StreamDataset;
 use crate::utils::{format_float, write_json_pretty};
@@ -40,7 +41,9 @@ pub fn train_main(
     let mut optimizer = AdamW::new(varmap.all_vars(), params)?;
 
     let csv_path = train_config.out_dir.join("logs").join("train.csv");
+    let mini_core_csv_path = train_config.out_dir.join("logs").join("mini_core.csv");
     init_csv_log(&csv_path)?;
+    init_mini_core_csv_log(&mini_core_csv_path)?;
 
     let progress = ProgressBar::new(train_config.steps as u64);
     progress.set_position(start_step as u64);
@@ -129,7 +132,12 @@ pub fn train_main(
             )?;
         }
 
-        if step % train_config.save_every == 0 || step == train_config.steps {
+        let should_save = step % train_config.save_every == 0
+            || step == train_config.steps
+            || train_config
+                .mini_core_every
+                .is_some_and(|every| step % every == 0);
+        if should_save {
             let checkpoint_dir = train_config
                 .out_dir
                 .join("checkpoints")
@@ -143,6 +151,42 @@ pub fn train_main(
                     train: train_config.clone(),
                 },
             )?;
+            if train_config
+                .mini_core_every
+                .is_some_and(|every| step % every == 0)
+            {
+                let mini_core = run_mini_core(
+                    &checkpoint_dir,
+                    device,
+                    Some(train_config.model_dtype.as_str()),
+                    train_config.mini_core_limit,
+                )?;
+                for dataset in &mini_core.datasets {
+                    println!(
+                        "mini_core step={} dataset={} acc={} centered={} ex/s={}",
+                        step,
+                        dataset.name,
+                        format_float(dataset.accuracy),
+                        format_float(dataset.centered_accuracy),
+                        format_float(dataset.examples_per_sec),
+                    );
+                    append_mini_core_csv_log(
+                        &mini_core_csv_path,
+                        step,
+                        dataset.name,
+                        dataset.accuracy,
+                        dataset.centered_accuracy,
+                        dataset.examples,
+                        dataset.examples_per_sec,
+                        &checkpoint_dir,
+                    )?;
+                }
+                println!(
+                    "mini_core step={} score={}",
+                    step,
+                    format_float(mini_core.mini_core)
+                );
+            }
         }
 
         progress.set_message(step.to_string());
@@ -277,6 +321,37 @@ fn save_checkpoint(path: &Path, varmap: &candle_nn::VarMap, meta: &CheckpointMet
         .save(path.join("model.safetensors"))
         .with_context(|| format!("failed to save weights into {}", path.display()))?;
     write_json_pretty(&path.join("meta.json"), meta)?;
+    Ok(())
+}
+
+fn init_mini_core_csv_log(path: &Path) -> Result<()> {
+    if !path.exists() {
+        let mut file = File::create(path)?;
+        writeln!(
+            file,
+            "step,dataset,accuracy,centered_accuracy,examples,examples_per_sec,checkpoint"
+        )?;
+        file.flush()?;
+    }
+    Ok(())
+}
+
+fn append_mini_core_csv_log(
+    path: &Path,
+    step: usize,
+    dataset: &str,
+    accuracy: f64,
+    centered_accuracy: f64,
+    examples: usize,
+    examples_per_sec: f64,
+    checkpoint: &Path,
+) -> Result<()> {
+    let mut file = OpenOptions::new().append(true).open(path)?;
+    writeln!(
+        file,
+        "{step},{dataset},{accuracy},{centered_accuracy},{examples},{examples_per_sec},{}",
+        checkpoint.display()
+    )?;
     Ok(())
 }
 
