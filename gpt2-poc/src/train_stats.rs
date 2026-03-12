@@ -9,11 +9,16 @@ use serde::{Deserialize, Serialize};
 pub struct TrainPoint {
     pub step: u64,
     pub tokens_seen: u64,
+    #[serde(default)]
     pub elapsed_sec: f32,
     pub train_loss: f32,
+    #[serde(default)]
     pub val_loss: Option<f32>,
+    #[serde(default)]
     pub train_bpb: f32,
+    #[serde(default)]
     pub val_bpb: Option<f32>,
+    #[serde(default)]
     pub mini_core: Option<f32>,
 }
 

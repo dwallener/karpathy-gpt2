@@ -3,7 +3,7 @@ use crate::train_stats::{TrainPoint, TrainStats};
 
 const WIDTH: usize = 72;
 const HEIGHT: usize = 16;
-const MAX_POINTS: usize = 2000;
+const WINDOW_TOKENS: u64 = 2_000_000;
 
 pub struct DiagnosticsReport {
     pub latest_step: u64,
@@ -22,7 +22,7 @@ pub struct DiagnosticsReport {
 }
 
 pub fn build_diagnostics(stats: &TrainStats) -> Option<DiagnosticsReport> {
-    let points = recent_points(stats);
+    let points = recent_window_points(stats);
     let latest = points.last()?;
     let elapsed_sec = latest.elapsed_sec.max(1e-6);
 
@@ -44,7 +44,7 @@ pub fn build_diagnostics(stats: &TrainStats) -> Option<DiagnosticsReport> {
 }
 
 pub fn plot_loss_vs_tokens(stats: &TrainStats) -> String {
-    let points = recent_points(stats);
+    let points = recent_window_points(stats);
     if points.is_empty() {
         return "Loss / BPB vs Tokens (log scale)\n\n(no data)\n".to_string();
     }
@@ -69,11 +69,6 @@ pub fn plot_loss_vs_tokens(stats: &TrainStats) -> String {
         y_max += 0.1;
     }
 
-    let min_tokens = points.first().map(|p| p.tokens_seen.max(1)).unwrap_or(1);
-    let max_tokens = points.last().map(|p| p.tokens_seen.max(1)).unwrap_or(min_tokens);
-    let log_min = (min_tokens as f32).log10();
-    let log_max = (max_tokens as f32).log10().max(log_min + 1e-6);
-
     let mut grid = vec![vec![' '; WIDTH]; HEIGHT];
     render_bucketed_series(&mut grid, &train_buckets, y_min, y_max, '.');
     render_bucketed_series(&mut grid, &val_buckets, y_min, y_max, '*');
@@ -88,16 +83,26 @@ pub fn plot_loss_vs_tokens(stats: &TrainStats) -> String {
         lines.push(format!("{:>4.1} | {}", label, row_text));
     }
     lines.push(format!("     +{}", "-".repeat(WIDTH)));
+    let min_tokens = points.first().map(|p| p.tokens_seen).unwrap_or(0);
+    let max_tokens = points.last().map(|p| p.tokens_seen).unwrap_or(min_tokens);
     lines.push(format!(
         "      {}",
-        token_axis_labels(log_min, log_max, WIDTH)
+        token_axis_labels(min_tokens, max_tokens, WIDTH)
     ));
     lines.join("\n")
 }
 
-fn recent_points(stats: &TrainStats) -> &[TrainPoint] {
-    let len = stats.points.len();
-    let start = len.saturating_sub(MAX_POINTS);
+fn recent_window_points(stats: &TrainStats) -> &[TrainPoint] {
+    if stats.points.is_empty() {
+        return &stats.points[..];
+    }
+    let latest_tokens = stats.points.last().map(|p| p.tokens_seen).unwrap_or(0);
+    let window_start = latest_tokens.saturating_sub(WINDOW_TOKENS);
+    let start = stats
+        .points
+        .iter()
+        .position(|point| point.tokens_seen >= window_start)
+        .unwrap_or(0);
     &stats.points[start..]
 }
 
@@ -158,35 +163,81 @@ fn render_bucketed_series(
     }
 }
 
-fn token_axis_labels(log_min: f32, log_max: f32, width: usize) -> String {
-    let ticks = 5usize;
+fn token_axis_labels(min_tokens: u64, max_tokens: u64, width: usize) -> String {
+    let ticks = linear_ticks(min_tokens, max_tokens);
     let mut chars = vec![' '; width];
-    for idx in 0..ticks {
-        let frac = if ticks == 1 {
+    let mut occupied = vec![false; width];
+    for (tokens, label) in ticks {
+        let frac = if max_tokens == min_tokens {
             0.0
         } else {
-            idx as f32 / (ticks - 1) as f32
-        };
-        let tick = log_min + frac * (log_max - log_min);
-        let label = format_token_tick(10f32.powf(tick));
+            (tokens.saturating_sub(min_tokens)) as f32 / (max_tokens - min_tokens).max(1) as f32
+        }
+        .clamp(0.0, 1.0);
         let col = ((width.saturating_sub(1) as f32) * frac).round() as usize;
+        let start = centered_label_start(col, label.len(), width);
+        let end = (start + label.len()).min(width);
+        if occupied[start..end].iter().any(|used| *used) {
+            continue;
+        }
         for (offset, ch) in label.chars().enumerate() {
-            let pos = col.saturating_add(offset).min(width.saturating_sub(1));
-            chars[pos] = ch;
+            let pos = start + offset;
+            if pos < width {
+                chars[pos] = ch;
+                occupied[pos] = true;
+            }
         }
     }
+
     chars.into_iter().collect::<String>() + " tokens"
 }
 
-fn format_token_tick(tokens: f32) -> String {
-    let log = tokens.log10();
-    let exponent = log.floor() as i32;
-    let mantissa = 10f32.powf(log - exponent as f32);
-    if (mantissa - 1.0).abs() < 0.15 {
-        format!("1e{exponent}")
-    } else if (mantissa - 3.0).abs() < 0.35 {
-        format!("3e{exponent}")
+fn centered_label_start(col: usize, label_len: usize, width: usize) -> usize {
+    col.saturating_sub(label_len / 2)
+        .min(width.saturating_sub(label_len))
+}
+
+fn linear_ticks(min_tokens: u64, max_tokens: u64) -> Vec<(u64, String)> {
+    let span = max_tokens.saturating_sub(min_tokens).max(1);
+    let step = choose_linear_tick_step(span);
+    let first_tick = (min_tokens / step) * step;
+    let mut ticks = Vec::new();
+    let mut value = first_tick;
+    while value <= max_tokens {
+        if value >= min_tokens {
+            ticks.push((value, format_compact_tick(value)));
+        }
+        match value.checked_add(step) {
+            Some(next) => value = next,
+            None => break,
+        }
+    }
+    if ticks.is_empty() {
+        ticks.push((min_tokens, format_compact_tick(min_tokens)));
+        if max_tokens != min_tokens {
+            ticks.push((max_tokens, format_compact_tick(max_tokens)));
+        }
+    }
+    ticks
+}
+
+fn choose_linear_tick_step(span: u64) -> u64 {
+    match span {
+        0..=1_200_000 => 100_000,
+        1_200_001..=2_400_000 => 200_000,
+        2_400_001..=6_000_000 => 500_000,
+        _ => 1_000_000,
+    }
+}
+
+fn format_compact_tick(tokens: u64) -> String {
+    if tokens >= 1_000_000_000 {
+        format!("{:.1}B", tokens as f64 / 1_000_000_000.0)
+    } else if tokens >= 1_000_000 {
+        format!("{:.1}M", tokens as f64 / 1_000_000.0)
+    } else if tokens >= 1_000 {
+        format!("{:.0}k", tokens as f64 / 1_000.0)
     } else {
-        format!("{:.0}e{}", mantissa, exponent)
+        tokens.to_string()
     }
 }
