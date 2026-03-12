@@ -15,7 +15,7 @@ use crate::diag::token_entropy::ascii_rank_plot;
 use crate::eval::run_mini_core;
 use crate::model::{build_model, cross_entropy_loss};
 use crate::stream_dataset::StreamDataset;
-use crate::train_stats::{TrainPoint, TrainStats};
+use crate::train_stats::{RouterMetricPoint, TrainPoint, TrainStats};
 use crate::utils::{format_float, write_json_pretty};
 
 pub fn train_main(
@@ -80,7 +80,7 @@ pub fn train_main(
         let batch_wait_ms = batch_wait_start.elapsed().as_secs_f64() * 1_000.0;
 
         let step_start = Instant::now();
-        let (logits, _) = model.forward(&batch.xs)?;
+        let (logits, _, router_metrics) = model.forward_with_metrics(&batch.xs)?;
         let loss = cross_entropy_loss(&logits, &batch.ys)?;
 
         let mut grads = loss.backward()?;
@@ -161,6 +161,13 @@ pub fn train_main(
             val_loss: val_loss.map(|value| value as f32),
             train_bpb: train_bpb as f32,
             val_bpb: val_bpb.map(|value| value as f32),
+            router: RouterMetricPoint {
+                routing_entropy: router_metrics.routing_entropy,
+                max_operator_share: router_metrics.max_operator_share,
+                num_active_operators: router_metrics.num_active_operators,
+                operator_usage: router_metrics.operator_usage,
+                gate_mass: router_metrics.gate_mass,
+            },
             mini_core: None,
         });
 
@@ -473,8 +480,25 @@ fn print_training_diagnostics(
         "learning_slope={}",
         format_float(report.learning_slope as f64)
     );
+    println!(
+        "router_entropy={}",
+        format_float(report.router.routing_entropy as f64)
+    );
+    println!(
+        "router_max_share={}",
+        format_float(report.router.max_operator_share as f64)
+    );
+    println!("router_active_ops={}", report.router.num_active_operators);
     println!("tokens_per_second={}", format_float(report.tokens_per_second as f64));
     println!("tokens_per_hour={}", format_float(report.tokens_per_hour as f64));
+    println!(
+        "router_usage={}",
+        format_router_vector(&report.router.operator_usage)
+    );
+    println!(
+        "router_gate_mass={}",
+        format_router_vector(&report.router.gate_mass)
+    );
     println!();
     println!("{}", report.plot);
     if scaling_predictor_enabled {
@@ -499,6 +523,15 @@ fn print_training_diagnostics(
             );
         }
     }
+}
+
+fn format_router_vector(values: &[f32]) -> String {
+    values
+        .iter()
+        .enumerate()
+        .map(|(idx, value)| format!("{idx}:{value:.3}"))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn scaling_hint(alpha: f32) -> &'static str {

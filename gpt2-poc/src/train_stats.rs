@@ -5,6 +5,15 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RouterMetricPoint {
+    pub routing_entropy: f32,
+    pub max_operator_share: f32,
+    pub num_active_operators: usize,
+    pub operator_usage: Vec<f32>,
+    pub gate_mass: Vec<f32>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrainPoint {
     pub step: u64,
@@ -18,6 +27,8 @@ pub struct TrainPoint {
     pub train_bpb: f32,
     #[serde(default)]
     pub val_bpb: Option<f32>,
+    #[serde(default)]
+    pub router: RouterMetricPoint,
     #[serde(default)]
     pub mini_core: Option<f32>,
 }

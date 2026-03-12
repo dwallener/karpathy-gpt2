@@ -16,6 +16,15 @@ struct SparseRoute {
     gate_values: Vec<f32>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct RouterMetrics {
+    pub routing_entropy: f32,
+    pub max_operator_share: f32,
+    pub num_active_operators: usize,
+    pub operator_usage: Vec<f32>,
+    pub gate_mass: Vec<f32>,
+}
+
 impl Operator {
     fn new(
         vb: VarBuilder<'_>,
@@ -109,10 +118,19 @@ impl OperatorStateLM {
     }
 
     pub fn forward(&self, xs: &Tensor) -> Result<(Tensor, Tensor)> {
+        let (logits, state, _) = self.forward_with_metrics(xs)?;
+        Ok((logits, state))
+    }
+
+    pub fn forward_with_metrics(&self, xs: &Tensor) -> Result<(Tensor, Tensor, RouterMetrics)> {
         let (batch_size, seq_len) = xs.dims2()?;
         let mut state = Tensor::zeros((batch_size, self.config.d_state), self.dtype, xs.device())?;
         let embeddings = self.token_embedding.forward(xs)?;
         let mut logits_steps = Vec::with_capacity(seq_len);
+        let mut usage_counts = vec![0usize; self.config.num_operators];
+        let mut gate_mass = vec![0f32; self.config.num_operators];
+        let mut total_route_entropy = 0f32;
+        let mut route_rows = 0usize;
 
         for t in 0..seq_len {
             let e_t = embeddings.i((.., t, ..))?.contiguous()?;
@@ -121,6 +139,17 @@ impl OperatorStateLM {
             let router_scores = self.router_proj.forward(&router_hidden)?;
             let routing =
                 topk_routes(&router_scores, self.config.top_k, self.config.num_operators)?;
+            for (op_idx, route) in routing.iter().enumerate() {
+                usage_counts[op_idx] += route.row_indices.len();
+                gate_mass[op_idx] += route.gate_values.iter().sum::<f32>();
+                total_route_entropy += route
+                    .gate_values
+                    .iter()
+                    .filter(|p| **p > 0.0)
+                    .map(|p| -p * p.ln())
+                    .sum::<f32>();
+                route_rows += route.row_indices.len();
+            }
 
             let mut mixed =
                 Tensor::zeros((batch_size, self.config.d_state), self.dtype, xs.device())?;
@@ -164,7 +193,42 @@ impl OperatorStateLM {
         }
 
         let logits = Tensor::stack(&logits_steps.iter().collect::<Vec<_>>(), 1)?;
-        Ok((logits, state))
+        let total_assignments = (batch_size * seq_len * self.config.top_k) as f32;
+        let operator_usage = if total_assignments > 0.0 {
+            usage_counts
+                .iter()
+                .map(|count| *count as f32 / total_assignments)
+                .collect::<Vec<_>>()
+        } else {
+            vec![0.0; self.config.num_operators]
+        };
+        let total_gate_mass = gate_mass.iter().sum::<f32>().max(1e-9);
+        let gate_mass = gate_mass
+            .into_iter()
+            .map(|mass| mass / total_gate_mass)
+            .collect::<Vec<_>>();
+        let max_operator_share = operator_usage
+            .iter()
+            .copied()
+            .fold(0.0f32, f32::max);
+        let num_active_operators = usage_counts.iter().filter(|count| **count > 0).count();
+        let routing_entropy = if route_rows > 0 {
+            total_route_entropy / route_rows as f32
+        } else {
+            0.0
+        };
+
+        Ok((
+            logits,
+            state,
+            RouterMetrics {
+                routing_entropy,
+                max_operator_share,
+                num_active_operators,
+                operator_usage,
+                gate_mass,
+            },
+        ))
     }
 }
 
