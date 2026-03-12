@@ -1,4 +1,4 @@
-use crate::train_stats::TrainStats;
+use crate::train_stats::{TrainPoint, TrainStats};
 
 const MIN_TOKENS_SEEN: u64 = 100_000;
 const MIN_POINTS: usize = 5;
@@ -12,59 +12,86 @@ pub struct ScalingPrediction {
     pub predicted_mini_core: f32,
 }
 
-pub fn predict_final_loss(stats: &TrainStats) -> Option<ScalingPrediction> {
-    let mut n = 0f64;
-    let mut sum_x = 0f64;
-    let mut sum_y = 0f64;
-    let mut sum_xx = 0f64;
-    let mut sum_xy = 0f64;
+pub fn compute_learning_slope(points: &[TrainPoint]) -> f32 {
+    let n = points.len();
+    if n < 5 {
+        return 0.0;
+    }
 
-    for point in stats.recent(200) {
+    let mut sx = 0.0f32;
+    let mut sy = 0.0f32;
+    let mut sxx = 0.0f32;
+    let mut sxy = 0.0f32;
+
+    for point in points {
+        let x = (point.tokens_seen.max(1) as f32).log10();
+        let y = point.train_loss;
+        sx += x;
+        sy += y;
+        sxx += x * x;
+        sxy += x * y;
+    }
+
+    let n = n as f32;
+    let denom = n * sxx - sx * sx;
+    if denom.abs() < 1e-6 {
+        return 0.0;
+    }
+
+    (n * sxy - sx * sy) / denom
+}
+
+pub fn predict_final_loss(stats: &TrainStats) -> Option<ScalingPrediction> {
+    let mut n = 0f32;
+    let mut sx = 0f32;
+    let mut sy = 0f32;
+    let mut sxx = 0f32;
+    let mut sxy = 0f32;
+
+    for point in stats.points.iter().rev().take(2000).rev() {
         let Some(val_loss) = point.val_loss else {
             continue;
         };
         if point.tokens_seen < MIN_TOKENS_SEEN || val_loss <= 0.0 {
             continue;
         }
-        let x = (point.tokens_seen as f64).log10();
-        let y = (val_loss as f64).log10();
+        let x = (point.tokens_seen as f32).log10();
+        let y = val_loss.log10();
         n += 1.0;
-        sum_x += x;
-        sum_y += y;
-        sum_xx += x * x;
-        sum_xy += x * y;
+        sx += x;
+        sy += y;
+        sxx += x * x;
+        sxy += x * y;
     }
 
-    if n < MIN_POINTS as f64 {
+    if n < MIN_POINTS as f32 {
         return None;
     }
 
-    let denom = n * sum_xx - sum_x * sum_x;
-    if denom.abs() < 1e-9 {
+    let denom = n * sxx - sx * sx;
+    if denom.abs() < 1e-6 {
         return None;
     }
 
-    let m = (n * sum_xy - sum_x * sum_y) / denom;
-    let b = (sum_y - m * sum_x) / n;
-    let alpha = (-m) as f32;
+    let m = (n * sxy - sx * sy) / denom;
+    let b = (sy - m * sx) / n;
+    let alpha = -m;
 
     let predicted_loss_10m = predict_loss(m, b, 10_000_000.0);
     let predicted_loss_100m = predict_loss(m, b, 100_000_000.0);
     let predicted_loss_1b = predict_loss(m, b, 1_000_000_000.0);
-    let predicted_mini_core = estimate_mini_core(predicted_loss_100m);
 
     Some(ScalingPrediction {
         alpha,
         predicted_loss_10m,
         predicted_loss_100m,
         predicted_loss_1b,
-        predicted_mini_core,
+        predicted_mini_core: estimate_mini_core(predicted_loss_100m),
     })
 }
 
-fn predict_loss(m: f64, b: f64, tokens: f64) -> f32 {
-    let log_loss = m * tokens.log10() + b;
-    10f64.powf(log_loss) as f32
+fn predict_loss(m: f32, b: f32, tokens: f32) -> f32 {
+    10f32.powf(m * tokens.log10() + b)
 }
 
 fn estimate_mini_core(loss: f32) -> f32 {

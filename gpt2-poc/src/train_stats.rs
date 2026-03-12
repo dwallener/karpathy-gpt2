@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 pub struct TrainPoint {
     pub step: u64,
     pub tokens_seen: u64,
+    pub elapsed_sec: f32,
     pub train_loss: f32,
     pub val_loss: Option<f32>,
     pub mini_core: Option<f32>,

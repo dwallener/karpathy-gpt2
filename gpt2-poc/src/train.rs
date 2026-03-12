@@ -143,6 +143,7 @@ pub fn train_main(
         stats.push(TrainPoint {
             step: step as u64,
             tokens_seen,
+            elapsed_sec: elapsed as f32,
             train_loss: train_loss as f32,
             val_loss: val_loss.map(|value| value as f32),
             mini_core: None,
@@ -434,11 +435,10 @@ fn print_training_diagnostics(
     );
     println!(
         "learning_slope={}",
-        report
-            .learning_slope
-            .map(format_float)
-            .unwrap_or_else(|| "na".to_string())
+        format_float(report.learning_slope as f64)
     );
+    println!("tokens_per_second={}", format_float(report.tokens_per_second as f64));
+    println!("tokens_per_hour={}", format_float(report.tokens_per_hour as f64));
     println!();
     println!("{}", report.plot);
     if scaling_predictor_enabled {
