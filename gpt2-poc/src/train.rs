@@ -9,9 +9,11 @@ use candle_nn::{AdamW, Optimizer, ParamsAdamW};
 use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::config::{CheckpointMeta, Config, TrainConfig};
+use crate::diag::ascii_plot::build_diagnostics;
 use crate::eval::run_mini_core;
 use crate::model::{build_model, cross_entropy_loss};
 use crate::stream_dataset::StreamDataset;
+use crate::train_stats::{TrainPoint, TrainStats};
 use crate::utils::{format_float, write_json_pretty};
 
 pub fn train_main(
@@ -42,8 +44,10 @@ pub fn train_main(
 
     let csv_path = train_config.out_dir.join("logs").join("train.csv");
     let mini_core_csv_path = train_config.out_dir.join("logs").join("mini_core.csv");
+    let training_curve_path = train_config.out_dir.join("training_curve.jsonl");
     init_csv_log(&csv_path)?;
     init_mini_core_csv_log(&mini_core_csv_path)?;
+    init_training_curve_log(&training_curve_path)?;
 
     let progress = ProgressBar::new(train_config.steps as u64);
     progress.set_position(start_step as u64);
@@ -55,6 +59,7 @@ pub fn train_main(
     let mut running_tokens = 0usize;
     let mut running_docs = 0usize;
     let mut train_compute_time = 0f64;
+    let mut stats = TrainStats::default();
 
     for step in (start_step + 1)..=train_config.steps {
         let batch_wait_start = Instant::now();
@@ -79,7 +84,9 @@ pub fn train_main(
         train_compute_time += step_time_ms / 1_000.0;
 
         let train_loss = loss.to_dtype(DType::F32)?.to_scalar::<f32>()? as f64;
-        running_tokens += train_config.batch_size * train_config.seq_len;
+        let tokens_per_step = train_config.batch_size * train_config.seq_len;
+        let tokens_seen = (step * tokens_per_step) as u64;
+        running_tokens += tokens_per_step;
         running_docs += batch.docs_consumed;
         let elapsed = start_time.elapsed().as_secs_f64().max(1e-9);
         let train_elapsed = train_compute_time.max(1e-9);
@@ -97,8 +104,9 @@ pub fn train_main(
 
         if step % train_config.log_every == 0 || val_loss.is_some() || step == 1 {
             println!(
-                "step={} train_loss={} val_loss={} train_tok/s={} train_docs/s={} batch_wait_ms={} step_time_ms={} eval_time_ms={} tokenizer_q={} parquet_q={} current_shard={} elapsed_sec={}",
+                "step={} tokens_seen={} train_loss={} val_loss={} train_tok/s={} train_docs/s={} batch_wait_ms={} step_time_ms={} eval_time_ms={} tokenizer_q={} parquet_q={} current_shard={} elapsed_sec={}",
                 step,
+                tokens_seen,
                 format_float(train_loss),
                 val_loss
                     .map(format_float)
@@ -132,11 +140,20 @@ pub fn train_main(
             )?;
         }
 
+        stats.push(TrainPoint {
+            step: step as u64,
+            tokens_seen,
+            train_loss: train_loss as f32,
+            val_loss: val_loss.map(|value| value as f32),
+            mini_core: None,
+        });
+
         let should_save = step % train_config.save_every == 0
             || step == train_config.steps
             || train_config
                 .mini_core_every
                 .is_some_and(|every| step % every == 0);
+        let mut mini_core_score = None;
         if should_save {
             let checkpoint_dir = train_config
                 .out_dir
@@ -186,6 +203,25 @@ pub fn train_main(
                     step,
                     format_float(mini_core.mini_core)
                 );
+                mini_core_score = Some(mini_core.mini_core as f32);
+            }
+        }
+
+        if let Some(point) = stats.last_mut() {
+            point.mini_core = mini_core_score;
+        }
+        append_training_curve_log(&training_curve_path, stats.last().expect("point was pushed"))?;
+
+        let should_diag = train_config
+            .diag_every
+            .is_some_and(|every| step % every == 0)
+            || (train_config.diag_every.is_none()
+                && train_config
+                    .mini_core_every
+                    .is_some_and(|every| step % every == 0));
+        if should_diag {
+            if let Some(report) = build_diagnostics(&stats) {
+                print_training_diagnostics(&report);
             }
         }
 
@@ -353,6 +389,52 @@ fn append_mini_core_csv_log(
         checkpoint.display()
     )?;
     Ok(())
+}
+
+fn init_training_curve_log(path: &Path) -> Result<()> {
+    if !path.exists() {
+        File::create(path)?;
+    }
+    Ok(())
+}
+
+fn append_training_curve_log(path: &Path, point: &TrainPoint) -> Result<()> {
+    let mut file = OpenOptions::new().append(true).open(path)?;
+    serde_json::to_writer(&mut file, point)?;
+    writeln!(file)?;
+    Ok(())
+}
+
+fn print_training_diagnostics(report: &crate::diag::ascii_plot::DiagnosticsReport) {
+    println!("==============================");
+    println!("Training Diagnostics");
+    println!("==============================");
+    println!("tokens_seen={}", report.latest_tokens_seen);
+    println!("steps={}", report.latest_step);
+    println!("train_loss={}", format_float(report.latest_train_loss as f64));
+    println!(
+        "val_loss={}",
+        report
+            .latest_val_loss
+            .map(|value| format_float(value as f64))
+            .unwrap_or_else(|| "na".to_string())
+    );
+    println!(
+        "mini_core={}",
+        report
+            .latest_mini_core
+            .map(|value| format_float(value as f64))
+            .unwrap_or_else(|| "na".to_string())
+    );
+    println!(
+        "learning_slope={}",
+        report
+            .learning_slope
+            .map(format_float)
+            .unwrap_or_else(|| "na".to_string())
+    );
+    println!();
+    println!("{}", report.plot);
 }
 
 fn load_checkpoint(path: &Path, varmap: &mut candle_nn::VarMap) -> Result<()> {

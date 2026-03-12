@@ -11,6 +11,8 @@ Rust-only next-token training POC for an operator/state/mixer/readout language m
 - `src/infer.rs`: checkpoint loading, greedy generation, and continuation scoring helpers
 - `src/eval/`: mini-CORE dataset loaders and evaluation harness
 - `src/stream_dataset.rs`: Parquet shard streaming, tokenization, and batch generation
+- `src/train_stats.rs`: in-memory training curve points
+- `src/diag/ascii_plot.rs`: ASCII loss-vs-tokens diagnostics
 - `src/model.rs`: operator/state recurrent LM with top-k routed operators
 - `src/train.rs`: AdamW training loop, eval, checkpointing, CSV logging
 - `src/utils.rs`: device resolution and JSON helpers
@@ -125,6 +127,7 @@ cargo run --release --features cuda -- train \
   --save-every 100 \
   --mini-core-every 100 \
   --mini-core-limit 200 \
+  --diag-every 100 \
   --d-model 384 \
   --d-state 1536 \
   --num-operators 8 \
@@ -157,6 +160,7 @@ cargo run --release -- train \
 - metadata: `meta.json`
 - training CSV: `OUT_DIR/logs/train.csv`
 - mini-CORE CSV: `OUT_DIR/logs/mini_core.csv`
+- training curve JSONL: `OUT_DIR/training_curve.jsonl`
 - CSV fields: `step,train_loss,val_loss,train_tokens_per_sec,train_docs_per_sec,batch_wait_ms,step_time_ms,eval_time_ms,tokenizer_queue_depth,parquet_queue_depth,current_shard,elapsed_sec`
 
 ## Inference
@@ -239,6 +243,52 @@ HellaSwag: 0.420000 centered=0.170000 examples=1000 ex/s=52.300000
 PIQA: 0.640000 centered=0.140000 examples=1000 ex/s=60.120000
 ARC-Easy: 0.550000 centered=0.300000 examples=570 ex/s=48.440000
 miniCORE: 0.203333
+```
+
+## Training Diagnostics
+
+The trainer now records per-step curve points and can print a compact ASCII loss plot.
+
+Stored per-step fields:
+
+```json
+{"step":100,"tokens_seen":102400,"train_loss":8.25,"val_loss":null,"mini_core":0.0}
+```
+
+Diagnostics trigger:
+
+- by default whenever mini-CORE runs
+- or explicitly with `--diag-every N`
+
+Example output:
+
+```text
+==============================
+Training Diagnostics
+==============================
+tokens_seen=102400
+steps=100
+train_loss=8.252387
+val_loss=na
+mini_core=0.000000
+learning_slope=-0.680000
+
+Loss vs Tokens (log scale)
+
+11.9 | *                                                           
+11.6 |  .                                                          
+11.3 |   .                                                         
+11.0 |    .                                                        
+10.7 |      .                                                      
+10.4 |        .                                                    
+10.1 |          .                                                  
+ 9.8 |            .                                                
+ 9.5 |              .                                              
+ 9.2 |                .                                            
+ 8.9 |                   .                                         
+ 8.6 |                      .                                      
+     +------------------------------------------------------------
+      1e5   2e5   3e5 tokens
 ```
 
 ## TODO

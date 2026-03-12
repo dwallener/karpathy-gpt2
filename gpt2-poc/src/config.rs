@@ -35,6 +35,7 @@ pub struct TrainConfig {
     pub model_dtype: String,
     pub mini_core_every: Option<usize>,
     pub mini_core_limit: Option<usize>,
+    pub diag_every: Option<usize>,
     pub steps: usize,
     pub lr: f64,
     pub weight_decay: f64,

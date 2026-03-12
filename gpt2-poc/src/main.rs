@@ -75,6 +75,8 @@ struct TrainArgs {
     mini_core_every: Option<usize>,
     #[arg(long)]
     mini_core_limit: Option<usize>,
+    #[arg(long)]
+    diag_every: Option<usize>,
     #[arg(long, default_value_t = 1000)]
     steps: usize,
     #[arg(long, default_value_t = 3e-4)]
@@ -153,6 +155,7 @@ impl TrainArgs {
                 .to_string(),
             mini_core_every: self.mini_core_every,
             mini_core_limit: self.mini_core_limit,
+            diag_every: self.diag_every,
             steps: self.steps,
             lr: self.lr,
             weight_decay: self.weight_decay,
