@@ -499,6 +499,9 @@ fn print_training_diagnostics(
         "router_gate_mass={}",
         format_router_vector(&report.router.gate_mass)
     );
+    if let Some(warning) = router_collapse_warning(&report.router) {
+        println!("WARNING: {warning}");
+    }
     println!();
     println!("{}", report.plot);
     if scaling_predictor_enabled {
@@ -532,6 +535,19 @@ fn format_router_vector(values: &[f32]) -> String {
         .map(|(idx, value)| format!("{idx}:{value:.3}"))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn router_collapse_warning(router: &RouterMetricPoint) -> Option<&'static str> {
+    if router.max_operator_share > 0.8 {
+        return Some("router collapse suspected: one operator dominates routing");
+    }
+    if router.num_active_operators <= 1 {
+        return Some("router collapse suspected: only one operator is active");
+    }
+    if router.routing_entropy < 0.2 {
+        return Some("router collapse suspected: routing entropy is extremely low");
+    }
+    None
 }
 
 fn scaling_hint(alpha: f32) -> &'static str {
