@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
-use gpt2_poc::infer::run_greedy_inference;
+use gpt2_poc::infer::{SamplingConfig, run_inference};
 use gpt2_poc::utils::{resolve_device, resolve_model_dtype};
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -32,7 +32,7 @@ impl ModelDTypeArg {
 #[command(
     author,
     version,
-    about = "Greedy inference against a saved operator/state checkpoint"
+    about = "Inference against a saved operator/state checkpoint"
 )]
 struct Cli {
     #[arg(long)]
@@ -41,6 +41,12 @@ struct Cli {
     prompt: String,
     #[arg(long, default_value_t = 32)]
     max_new_tokens: usize,
+    #[arg(long, default_value_t = 0.0)]
+    temperature: f32,
+    #[arg(long, default_value_t = 1)]
+    top_k: usize,
+    #[arg(long, default_value_t = 42)]
+    seed: u64,
     #[arg(long, value_enum, default_value = "cpu")]
     device: DeviceArg,
     #[arg(long, value_enum)]
@@ -52,12 +58,17 @@ fn main() -> Result<()> {
     let device = resolve_device(matches!(cli.device, DeviceArg::Cuda))?;
     let _dtype = resolve_model_dtype(&device, cli.model_dtype.map(ModelDTypeArg::as_str))?;
 
-    let output = run_greedy_inference(
+    let output = run_inference(
         &cli.checkpoint,
         &cli.prompt,
         cli.max_new_tokens,
         &device,
         cli.model_dtype.map(ModelDTypeArg::as_str),
+        SamplingConfig {
+            temperature: cli.temperature,
+            top_k: cli.top_k,
+            seed: cli.seed,
+        },
     )?;
 
     println!("prompt_tokens={}", output.prompt_tokens);

@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::{VarMap, ops};
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 use tokenizers::Tokenizer;
 
 use crate::config::CheckpointMeta;
@@ -14,6 +16,23 @@ pub struct InferenceOutput {
     pub prompt_tokens: usize,
     pub generated_tokens: Vec<u32>,
     pub decoded_text: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SamplingConfig {
+    pub temperature: f32,
+    pub top_k: usize,
+    pub seed: u64,
+}
+
+impl Default for SamplingConfig {
+    fn default() -> Self {
+        Self {
+            temperature: 0.0,
+            top_k: 1,
+            seed: 42,
+        }
+    }
 }
 
 pub struct InferenceSession {
@@ -50,6 +69,15 @@ impl InferenceSession {
     }
 
     pub fn generate_greedy(&self, prompt: &str, max_new_tokens: usize) -> Result<InferenceOutput> {
+        self.generate(prompt, max_new_tokens, SamplingConfig::default())
+    }
+
+    pub fn generate(
+        &self,
+        prompt: &str,
+        max_new_tokens: usize,
+        sampling: SamplingConfig,
+    ) -> Result<InferenceOutput> {
         let encoding = self
             .tokenizer
             .encode(prompt, false)
@@ -59,6 +87,7 @@ impl InferenceSession {
             bail!("prompt produced zero tokens");
         }
 
+        let mut rng = StdRng::seed_from_u64(sampling.seed);
         let mut generated = Vec::with_capacity(max_new_tokens);
         for _ in 0..max_new_tokens {
             let input = Tensor::from_vec(tokens.clone(), (1, tokens.len()), &self.device)?;
@@ -66,7 +95,12 @@ impl InferenceSession {
             let last_logits = logits
                 .i((0, logits.dim(1)? - 1, ..))?
                 .to_dtype(DType::F32)?;
-            let next_token = last_logits.argmax(0)?.to_scalar::<u32>()?;
+            let next_token = sample_next_token(
+                &last_logits.to_vec1::<f32>()?,
+                sampling.temperature,
+                sampling.top_k,
+                &mut rng,
+            )?;
             tokens.push(next_token);
             generated.push(next_token);
         }
@@ -150,8 +184,26 @@ pub fn run_greedy_inference(
     device: &Device,
     requested_dtype: Option<&str>,
 ) -> Result<InferenceOutput> {
+    run_inference(
+        checkpoint,
+        prompt,
+        max_new_tokens,
+        device,
+        requested_dtype,
+        SamplingConfig::default(),
+    )
+}
+
+pub fn run_inference(
+    checkpoint: &Path,
+    prompt: &str,
+    max_new_tokens: usize,
+    device: &Device,
+    requested_dtype: Option<&str>,
+    sampling: SamplingConfig,
+) -> Result<InferenceOutput> {
     let session = InferenceSession::load(checkpoint, device, requested_dtype)?;
-    session.generate_greedy(prompt, max_new_tokens)
+    session.generate(prompt, max_new_tokens, sampling)
 }
 
 pub fn load_checkpoint_meta(checkpoint: &Path) -> Result<CheckpointMeta> {
@@ -184,4 +236,56 @@ fn normalize_dtype_request(requested: Option<&str>) -> Option<&str> {
 fn load_tokenizer() -> Result<Tokenizer> {
     Tokenizer::from_pretrained("gpt2", None)
         .map_err(|err| anyhow::anyhow!("failed to load GPT-2 tokenizer: {err}"))
+}
+
+fn sample_next_token(
+    logits: &[f32],
+    temperature: f32,
+    top_k: usize,
+    rng: &mut StdRng,
+) -> Result<u32> {
+    if logits.is_empty() {
+        bail!("cannot sample from empty logits");
+    }
+    if temperature <= 0.0 || top_k <= 1 {
+        let (idx, _) = logits
+            .iter()
+            .copied()
+            .enumerate()
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+            .context("failed to select argmax token")?;
+        return Ok(idx as u32);
+    }
+
+    let mut ranked = logits
+        .iter()
+        .copied()
+        .enumerate()
+        .collect::<Vec<(usize, f32)>>();
+    ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let keep = top_k.min(ranked.len());
+    ranked.truncate(keep);
+
+    let max_logit = ranked
+        .iter()
+        .map(|(_, logit)| *logit / temperature)
+        .fold(f32::NEG_INFINITY, f32::max);
+    let weights = ranked
+        .iter()
+        .map(|(_, logit)| ((*logit / temperature) - max_logit).exp())
+        .collect::<Vec<_>>();
+    let total = weights.iter().sum::<f32>();
+    if total <= 0.0 || !total.is_finite() {
+        return Ok(ranked[0].0 as u32);
+    }
+
+    let mut draw = rng.r#gen::<f32>() * total;
+    for ((token_idx, _), weight) in ranked.iter().zip(weights.iter()) {
+        draw -= *weight;
+        if draw <= 0.0 {
+            return Ok(*token_idx as u32);
+        }
+    }
+
+    Ok(ranked.last().map(|(idx, _)| *idx as u32).unwrap_or(0))
 }
