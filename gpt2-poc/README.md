@@ -189,7 +189,7 @@ cargo run --release --bin infer -- \
   --max-new-tokens 32
 ```
 
-CUDA inference:
+CUDA greedy inference:
 
 ```bash
 cargo run --release --features cuda --bin infer -- \
@@ -198,6 +198,48 @@ cargo run --release --features cuda --bin infer -- \
   --model-dtype bf16 \
   --prompt "The meaning of life is" \
   --max-new-tokens 32
+```
+
+CUDA sampled inference:
+
+```bash
+cargo run --release --features cuda --bin infer -- \
+  --checkpoint runs/train_4060_full/checkpoints/step-00003200 \
+  --device cuda \
+  --model-dtype bf16 \
+  --prompt "The meaning of life is" \
+  --max-new-tokens 64 \
+  --temperature 0.8 \
+  --top-k 40 \
+  --seed 123
+```
+
+Inference defaults to greedy decoding. Sampling activates when `--temperature > 0` and `--top-k > 1`.
+
+Bulk inference with repeated prompts:
+
+```bash
+cargo run --release --features cuda --bin infer -- \
+  --checkpoint runs/train_4060_full/checkpoints/step-00003200 \
+  --device cuda \
+  --model-dtype bf16 \
+  --max-new-tokens 24 \
+  --prompt "The capital of France is" \
+  --prompt "The chemical symbol for gold is" \
+  --prompt "The opposite of cold is" \
+  --prompt "2 + 2 =" \
+  --prompt "The largest planet in the solar system is"
+```
+
+Bulk inference from a newline-delimited prompts file:
+
+```bash
+cargo run --release --features cuda --bin infer -- \
+  --checkpoint runs/train_4060_full/checkpoints/step-00003200 \
+  --device cuda \
+  --model-dtype bf16 \
+  --max-new-tokens 24 \
+  --prompts-file prompts.txt
 ```
 
 ## Mini-CORE Evaluation

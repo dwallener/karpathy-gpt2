@@ -1,6 +1,7 @@
+use std::fs;
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
 use gpt2_poc::infer::{SamplingConfig, run_inference};
 use gpt2_poc::utils::{resolve_device, resolve_model_dtype};
@@ -38,7 +39,9 @@ struct Cli {
     #[arg(long)]
     checkpoint: PathBuf,
     #[arg(long)]
-    prompt: String,
+    prompt: Vec<String>,
+    #[arg(long)]
+    prompts_file: Option<PathBuf>,
     #[arg(long, default_value_t = 32)]
     max_new_tokens: usize,
     #[arg(long, default_value_t = 0.0)]
@@ -57,22 +60,51 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let device = resolve_device(matches!(cli.device, DeviceArg::Cuda))?;
     let _dtype = resolve_model_dtype(&device, cli.model_dtype.map(ModelDTypeArg::as_str))?;
+    let prompts = load_prompts(&cli)?;
+    if prompts.is_empty() {
+        bail!("provide at least one --prompt or --prompts-file");
+    }
 
-    let output = run_inference(
-        &cli.checkpoint,
-        &cli.prompt,
-        cli.max_new_tokens,
-        &device,
-        cli.model_dtype.map(ModelDTypeArg::as_str),
-        SamplingConfig {
-            temperature: cli.temperature,
-            top_k: cli.top_k,
-            seed: cli.seed,
-        },
-    )?;
+    for (idx, prompt) in prompts.iter().enumerate() {
+        let output = run_inference(
+            &cli.checkpoint,
+            prompt,
+            cli.max_new_tokens,
+            &device,
+            cli.model_dtype.map(ModelDTypeArg::as_str),
+            SamplingConfig {
+                temperature: cli.temperature,
+                top_k: cli.top_k,
+                seed: cli.seed.saturating_add(idx as u64),
+            },
+        )?;
 
-    println!("prompt_tokens={}", output.prompt_tokens);
-    println!("generated_tokens={:?}", output.generated_tokens);
-    println!("{}", output.decoded_text);
+        if prompts.len() > 1 {
+            println!("=== Prompt {} ===", idx + 1);
+            println!("{}", prompt);
+        }
+        println!("prompt_tokens={}", output.prompt_tokens);
+        println!("generated_tokens={:?}", output.generated_tokens);
+        println!("{}", output.decoded_text);
+        if idx + 1 < prompts.len() {
+            println!();
+        }
+    }
     Ok(())
+}
+
+fn load_prompts(cli: &Cli) -> Result<Vec<String>> {
+    let mut prompts = cli.prompt.clone();
+    if let Some(path) = &cli.prompts_file {
+        let contents = fs::read_to_string(path)
+            .with_context(|| format!("failed to read prompts file {}", path.display()))?;
+        prompts.extend(
+            contents
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(ToOwned::to_owned),
+        );
+    }
+    Ok(prompts)
 }
