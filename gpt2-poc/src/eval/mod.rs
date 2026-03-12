@@ -8,6 +8,9 @@ use indicatif::{ProgressBar, ProgressStyle};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 
+use crate::diag::token_entropy::{
+    AggregateTokenEntropyReport, TokenEntropyReport, aggregate_reports, analyze_logits,
+};
 use crate::infer::InferenceSession;
 use crate::utils::format_float;
 
@@ -35,6 +38,7 @@ pub struct DatasetScore {
 pub struct MiniCoreReport {
     pub datasets: Vec<DatasetScore>,
     pub mini_core: f64,
+    pub token_entropy: Option<AggregateTokenEntropyReport>,
 }
 
 pub fn run_mini_core(
@@ -46,6 +50,7 @@ pub fn run_mini_core(
     let session = InferenceSession::load(checkpoint, device, requested_dtype)?;
     let cache_dir = PathBuf::from("data").join("eval");
     fs::create_dir_all(&cache_dir)?;
+    let mut entropy_samples = Vec::new();
 
     let datasets = vec![
         evaluate_dataset(
@@ -54,14 +59,23 @@ pub fn run_mini_core(
             0.25,
             hellaswag::load_examples(&cache_dir)?,
             limit,
+            &mut entropy_samples,
         )?,
-        evaluate_dataset(&session, "PIQA", 0.50, piqa::load_examples(&cache_dir)?, limit)?,
+        evaluate_dataset(
+            &session,
+            "PIQA",
+            0.50,
+            piqa::load_examples(&cache_dir)?,
+            limit,
+            &mut entropy_samples,
+        )?,
         evaluate_dataset(
             &session,
             "ARC-Easy",
             0.25,
             arc_easy::load_examples(&cache_dir)?,
             limit,
+            &mut entropy_samples,
         )?,
     ];
 
@@ -74,6 +88,7 @@ pub fn run_mini_core(
     Ok(MiniCoreReport {
         datasets,
         mini_core,
+        token_entropy: aggregate_reports(&entropy_samples, 50),
     })
 }
 
@@ -83,6 +98,7 @@ fn evaluate_dataset(
     random_baseline: f64,
     mut examples: Vec<EvalExample>,
     limit: Option<usize>,
+    entropy_samples: &mut Vec<TokenEntropyReport>,
 ) -> Result<DatasetScore> {
     if let Some(limit) = limit {
         examples.truncate(limit);
@@ -100,6 +116,10 @@ fn evaluate_dataset(
     let start = Instant::now();
     let mut correct = 0usize;
     for (idx, example) in examples.iter().enumerate() {
+        if entropy_samples.len() < 200 {
+            let logits = session.next_token_logits(&example.prompt)?;
+            entropy_samples.push(analyze_logits(&logits, 50));
+        }
         let prediction = best_choice(session, example)?;
         if prediction == example.correct_index {
             correct += 1;

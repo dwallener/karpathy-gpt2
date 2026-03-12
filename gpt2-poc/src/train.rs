@@ -10,6 +10,8 @@ use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::config::{CheckpointMeta, Config, TrainConfig};
 use crate::diag::ascii_plot::build_diagnostics;
+use crate::diag::bpb::loss_to_bpb;
+use crate::diag::token_entropy::ascii_rank_plot;
 use crate::eval::run_mini_core;
 use crate::model::{build_model, cross_entropy_loss};
 use crate::stream_dataset::StreamDataset;
@@ -48,6 +50,11 @@ pub fn train_main(
     init_csv_log(&csv_path)?;
     init_mini_core_csv_log(&mini_core_csv_path)?;
     init_training_curve_log(&training_curve_path)?;
+    let mut stats = TrainStats::load_jsonl(&training_curve_path)?;
+    if start_step > 0 {
+        stats.retain_up_to_step(start_step as u64);
+        stats.rewrite_jsonl(&training_curve_path)?;
+    }
 
     let progress = ProgressBar::new(train_config.steps as u64);
     progress.set_position(start_step as u64);
@@ -59,7 +66,6 @@ pub fn train_main(
     let mut running_tokens = 0usize;
     let mut running_docs = 0usize;
     let mut train_compute_time = 0f64;
-    let mut stats = TrainStats::default();
 
     for step in (start_step + 1)..=train_config.steps {
         let batch_wait_start = Instant::now();
@@ -84,6 +90,7 @@ pub fn train_main(
         train_compute_time += step_time_ms / 1_000.0;
 
         let train_loss = loss.to_dtype(DType::F32)?.to_scalar::<f32>()? as f64;
+        let train_bpb = loss_to_bpb(train_loss as f32) as f64;
         let tokens_per_step = train_config.batch_size * train_config.seq_len;
         let tokens_seen = (step * tokens_per_step) as u64;
         running_tokens += tokens_per_step;
@@ -94,21 +101,27 @@ pub fn train_main(
         let train_docs_per_sec = running_docs as f64 / train_elapsed;
 
         let mut val_loss = None;
+        let mut val_bpb = None;
         let mut eval_time_ms = None;
         if step % train_config.eval_every == 0 {
             let eval_start = Instant::now();
             let loss = evaluate_dataset(&model, &mut val_ds, train_config.val_batches, device)?;
             val_loss = Some(loss);
+            val_bpb = Some(loss_to_bpb(loss as f32) as f64);
             eval_time_ms = Some(eval_start.elapsed().as_secs_f64() * 1_000.0);
         }
 
         if step % train_config.log_every == 0 || val_loss.is_some() || step == 1 {
             println!(
-                "step={} tokens_seen={} train_loss={} val_loss={} train_tok/s={} train_docs/s={} batch_wait_ms={} step_time_ms={} eval_time_ms={} tokenizer_q={} parquet_q={} current_shard={} elapsed_sec={}",
+                "step={} tokens_seen={} train_loss={} train_bpb={} val_loss={} val_bpb={} train_tok/s={} train_docs/s={} batch_wait_ms={} step_time_ms={} eval_time_ms={} tokenizer_q={} parquet_q={} current_shard={} elapsed_sec={}",
                 step,
                 tokens_seen,
                 format_float(train_loss),
+                format_float(train_bpb),
                 val_loss
+                    .map(format_float)
+                    .unwrap_or_else(|| "na".to_string()),
+                val_bpb
                     .map(format_float)
                     .unwrap_or_else(|| "na".to_string()),
                 format_float(train_tokens_per_sec),
@@ -146,6 +159,8 @@ pub fn train_main(
             elapsed_sec: elapsed as f32,
             train_loss: train_loss as f32,
             val_loss: val_loss.map(|value| value as f32),
+            train_bpb: train_bpb as f32,
+            val_bpb: val_bpb.map(|value| value as f32),
             mini_core: None,
         });
 
@@ -204,6 +219,19 @@ pub fn train_main(
                     step,
                     format_float(mini_core.mini_core)
                 );
+                if let Some(report) = &mini_core.token_entropy {
+                    println!("Token Distribution Diagnostics");
+                    println!("------------------------------");
+                    println!("entropy={}", format_float(report.entropy as f64));
+                    println!("top1_prob={}", format_float(report.top1_prob as f64));
+                    println!("top10_mass={}", format_float(report.top10_mass as f64));
+                    println!("samples={}", report.samples);
+                    println!();
+                    println!("{}", ascii_rank_plot(&report.probs));
+                    if report.top1_prob > 0.9 || report.entropy < 1.0 {
+                        println!("WARNING: token distribution collapse suspected");
+                    }
+                }
                 mini_core_score = Some(mini_core.mini_core as f32);
             }
         }
@@ -419,10 +447,18 @@ fn print_training_diagnostics(
     println!("tokens_seen={}", report.latest_tokens_seen);
     println!("steps={}", report.latest_step);
     println!("train_loss={}", format_float(report.latest_train_loss as f64));
+    println!("train_bpb={}", format_float(report.latest_train_bpb as f64));
     println!(
         "val_loss={}",
         report
             .latest_val_loss
+            .map(|value| format_float(value as f64))
+            .unwrap_or_else(|| "na".to_string())
+    );
+    println!(
+        "val_bpb={}",
+        report
+            .latest_val_bpb
             .map(|value| format_float(value as f64))
             .unwrap_or_else(|| "na".to_string())
     );

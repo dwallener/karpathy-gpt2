@@ -14,6 +14,7 @@ Rust-only next-token training POC for an operator/state/mixer/readout language m
 - `src/train_stats.rs`: in-memory training curve points
 - `src/diag/ascii_plot.rs`: ASCII loss-vs-tokens diagnostics
 - `src/diag/scaling_predictor.rs`: early scaling-law fit and extrapolation
+- `src/diag/token_entropy.rs`: token entropy and rank-distribution diagnostics
 - `src/model.rs`: operator/state recurrent LM with top-k routed operators
 - `src/train.rs`: AdamW training loop, eval, checkpointing, CSV logging
 - `src/utils.rs`: device resolution and JSON helpers
@@ -247,14 +248,34 @@ ARC-Easy: 0.550000 centered=0.300000 examples=570 ex/s=48.440000
 miniCORE: 0.203333
 ```
 
+Whenever mini-CORE runs during training, the trainer also prints token-distribution diagnostics from prompt-only next-token predictions over a small evaluation sample:
+
+```text
+Token Distribution Diagnostics
+------------------------------
+entropy=6.420000
+top1_prob=0.180000
+top10_mass=0.640000
+samples=200
+
+Token Prob vs Rank
+
+ 1 | ****************************************
+ 2 | ********************
+ 3 | *************
+ 4 | ********
+ 5 | ******
+ 6 | ****
+```
+
 ## Training Diagnostics
 
-The trainer now records per-step curve points and can print a compact ASCII loss plot.
+The trainer now records per-step curve points, BPB estimates, and can print a compact ASCII loss plot.
 
 Stored per-step fields:
 
 ```json
-{"step":100,"tokens_seen":102400,"train_loss":8.25,"val_loss":null,"mini_core":0.0}
+{"step":100,"tokens_seen":102400,"elapsed_sec":168.99,"train_loss":8.25,"val_loss":null,"train_bpb":11.90,"val_bpb":null,"mini_core":0.0}
 ```
 
 Diagnostics trigger:
@@ -272,11 +293,13 @@ Training Diagnostics
 tokens_seen=102400
 steps=100
 train_loss=8.252387
+train_bpb=11.905804
 val_loss=na
+val_bpb=na
 mini_core=0.000000
 learning_slope=-0.680000
 
-Loss vs Tokens (log scale)
+Loss / BPB vs Tokens (log scale)
 
 11.9 | *                                                           
 11.6 |  .                                                          

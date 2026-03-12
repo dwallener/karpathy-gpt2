@@ -114,6 +114,20 @@ impl InferenceSession {
         Ok(total)
     }
 
+    pub fn next_token_logits(&self, prompt: &str) -> Result<Vec<f32>> {
+        let prompt_ids = self.encode(prompt)?;
+        if prompt_ids.is_empty() {
+            bail!("prompt produced zero tokens, cannot get next-token logits");
+        }
+        let input = Tensor::from_vec(prompt_ids.clone(), (1, prompt_ids.len()), &self.device)?;
+        let (logits, _) = self.model.forward(&input)?;
+        logits
+            .i((0, logits.dim(1)? - 1, ..))?
+            .to_dtype(DType::F32)?
+            .to_vec1::<f32>()
+            .map_err(Into::into)
+    }
+
     pub fn decode(&self, tokens: &[u32]) -> Result<String> {
         self.tokenizer
             .decode(tokens, true)

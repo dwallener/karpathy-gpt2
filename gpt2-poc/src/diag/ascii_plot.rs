@@ -10,7 +10,9 @@ pub struct DiagnosticsReport {
     pub latest_tokens_seen: u64,
     pub latest_elapsed_sec: f32,
     pub latest_train_loss: f32,
+    pub latest_train_bpb: f32,
     pub latest_val_loss: Option<f32>,
+    pub latest_val_bpb: Option<f32>,
     pub latest_mini_core: Option<f32>,
     pub learning_slope: f32,
     pub tokens_per_second: f32,
@@ -29,7 +31,9 @@ pub fn build_diagnostics(stats: &TrainStats) -> Option<DiagnosticsReport> {
         latest_tokens_seen: latest.tokens_seen,
         latest_elapsed_sec: latest.elapsed_sec,
         latest_train_loss: latest.train_loss,
+        latest_train_bpb: latest.train_bpb,
         latest_val_loss: latest.val_loss,
+        latest_val_bpb: latest.val_bpb,
         latest_mini_core: latest.mini_core,
         learning_slope: compute_learning_slope(points),
         tokens_per_second: latest.tokens_seen as f32 / elapsed_sec,
@@ -42,7 +46,7 @@ pub fn build_diagnostics(stats: &TrainStats) -> Option<DiagnosticsReport> {
 pub fn plot_loss_vs_tokens(stats: &TrainStats) -> String {
     let points = recent_points(stats);
     if points.is_empty() {
-        return "Loss vs Tokens (log scale)\n\n(no data)\n".to_string();
+        return "Loss / BPB vs Tokens (log scale)\n\n(no data)\n".to_string();
     }
 
     let train_buckets = bucketize_train(points, WIDTH);
@@ -55,7 +59,7 @@ pub fn plot_loss_vs_tokens(stats: &TrainStats) -> String {
         max_loss = max_loss.max(*value);
     }
     if !min_loss.is_finite() || !max_loss.is_finite() {
-        return "Loss vs Tokens (log scale)\n\n(no plottable losses)\n".to_string();
+        return "Loss / BPB vs Tokens (log scale)\n\n(no plottable losses)\n".to_string();
     }
 
     let mut y_min = (min_loss * 10.0).floor() / 10.0;
@@ -75,7 +79,7 @@ pub fn plot_loss_vs_tokens(stats: &TrainStats) -> String {
     render_bucketed_series(&mut grid, &val_buckets, y_min, y_max, '*');
 
     let mut lines = Vec::with_capacity(HEIGHT + 4);
-    lines.push("Loss vs Tokens (log scale)".to_string());
+    lines.push("Loss / BPB vs Tokens (log scale)".to_string());
     lines.push(String::new());
     for row in 0..HEIGHT {
         let frac = row as f32 / HEIGHT.saturating_sub(1).max(1) as f32;
