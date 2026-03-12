@@ -1,4 +1,5 @@
 use crate::train_stats::{TrainPoint, TrainStats};
+use crate::diag::scaling_predictor::{ScalingPrediction, predict_final_loss};
 
 const WIDTH: usize = 60;
 const HEIGHT: usize = 12;
@@ -12,6 +13,7 @@ pub struct DiagnosticsReport {
     pub latest_val_loss: Option<f32>,
     pub latest_mini_core: Option<f32>,
     pub learning_slope: Option<f64>,
+    pub scaling_prediction: Option<ScalingPrediction>,
     pub plot: String,
 }
 
@@ -26,6 +28,7 @@ pub fn build_diagnostics(stats: &TrainStats) -> Option<DiagnosticsReport> {
         latest_val_loss: latest.val_loss,
         latest_mini_core: latest.mini_core,
         learning_slope: compute_recent_slope(recent),
+        scaling_prediction: predict_final_loss(stats),
         plot: plot_loss_vs_tokens(stats),
     })
 }

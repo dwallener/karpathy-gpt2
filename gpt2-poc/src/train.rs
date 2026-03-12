@@ -219,9 +219,12 @@ pub fn train_main(
                 && train_config
                     .mini_core_every
                     .is_some_and(|every| step % every == 0));
+        let scaling_predictor_enabled = train_config.scaling_predictor.unwrap_or(
+            train_config.mini_core_every.is_some(),
+        );
         if should_diag {
             if let Some(report) = build_diagnostics(&stats) {
-                print_training_diagnostics(&report);
+                print_training_diagnostics(&report, scaling_predictor_enabled);
             }
         }
 
@@ -405,7 +408,10 @@ fn append_training_curve_log(path: &Path, point: &TrainPoint) -> Result<()> {
     Ok(())
 }
 
-fn print_training_diagnostics(report: &crate::diag::ascii_plot::DiagnosticsReport) {
+fn print_training_diagnostics(
+    report: &crate::diag::ascii_plot::DiagnosticsReport,
+    scaling_predictor_enabled: bool,
+) {
     println!("==============================");
     println!("Training Diagnostics");
     println!("==============================");
@@ -435,6 +441,42 @@ fn print_training_diagnostics(report: &crate::diag::ascii_plot::DiagnosticsRepor
     );
     println!();
     println!("{}", report.plot);
+    if scaling_predictor_enabled {
+        if let Some(pred) = report.scaling_prediction {
+            println!();
+            println!("Scaling Law Prediction");
+            println!("----------------------");
+            println!("alpha={}", format_float(pred.alpha as f64));
+            println!("pred_loss@10M={}", format_float(pred.predicted_loss_10m as f64));
+            println!(
+                "pred_loss@100M={}",
+                format_float(pred.predicted_loss_100m as f64)
+            );
+            println!("pred_loss@1B={}", format_float(pred.predicted_loss_1b as f64));
+            println!(
+                "predicted_mini_core={}",
+                format_float(pred.predicted_mini_core as f64)
+            );
+            println!(
+                "scaling_hint={}",
+                scaling_hint(pred.alpha)
+            );
+        }
+    }
+}
+
+fn scaling_hint(alpha: f32) -> &'static str {
+    if alpha > 0.5 {
+        "very strong scaling"
+    } else if alpha >= 0.3 {
+        "healthy"
+    } else if alpha >= 0.2 {
+        "weak"
+    } else if alpha >= 0.1 {
+        "architecture weak"
+    } else {
+        "training broken"
+    }
 }
 
 fn load_checkpoint(path: &Path, varmap: &mut candle_nn::VarMap) -> Result<()> {

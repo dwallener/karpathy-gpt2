@@ -13,6 +13,7 @@ Rust-only next-token training POC for an operator/state/mixer/readout language m
 - `src/stream_dataset.rs`: Parquet shard streaming, tokenization, and batch generation
 - `src/train_stats.rs`: in-memory training curve points
 - `src/diag/ascii_plot.rs`: ASCII loss-vs-tokens diagnostics
+- `src/diag/scaling_predictor.rs`: early scaling-law fit and extrapolation
 - `src/model.rs`: operator/state recurrent LM with top-k routed operators
 - `src/train.rs`: AdamW training loop, eval, checkpointing, CSV logging
 - `src/utils.rs`: device resolution and JSON helpers
@@ -128,6 +129,7 @@ cargo run --release --features cuda -- train \
   --mini-core-every 100 \
   --mini-core-limit 200 \
   --diag-every 100 \
+  --scaling-predictor true \
   --d-model 384 \
   --d-state 1536 \
   --num-operators 8 \
@@ -259,6 +261,7 @@ Diagnostics trigger:
 
 - by default whenever mini-CORE runs
 - or explicitly with `--diag-every N`
+- scaling-law prediction is enabled automatically when mini-CORE is enabled, or override with `--scaling-predictor true|false`
 
 Example output:
 
@@ -290,6 +293,34 @@ Loss vs Tokens (log scale)
      +------------------------------------------------------------
       1e5   2e5   3e5 tokens
 ```
+
+When enough validation points exist, diagnostics also print a simple scaling-law extrapolation based on the approximate fit:
+
+```text
+log10(loss) = a + b * log10(tokens)
+alpha ~= -b
+```
+
+Example:
+
+```text
+Scaling Law Prediction
+----------------------
+alpha=0.310000
+pred_loss@10M=6.800000
+pred_loss@100M=5.300000
+pred_loss@1B=4.400000
+predicted_mini_core=0.100000
+scaling_hint=healthy
+```
+
+Interpretation:
+
+- `alpha > 0.5`: very strong scaling
+- `0.3 <= alpha <= 0.5`: healthy
+- `0.2 <= alpha < 0.3`: weak
+- `0.1 <= alpha < 0.2`: architecture weak
+- `alpha < 0.1`: training broken
 
 ## TODO
 

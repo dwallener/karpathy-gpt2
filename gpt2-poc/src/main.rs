@@ -77,6 +77,8 @@ struct TrainArgs {
     mini_core_limit: Option<usize>,
     #[arg(long)]
     diag_every: Option<usize>,
+    #[arg(long)]
+    scaling_predictor: Option<bool>,
     #[arg(long, default_value_t = 1000)]
     steps: usize,
     #[arg(long, default_value_t = 3e-4)]
@@ -156,6 +158,7 @@ impl TrainArgs {
             mini_core_every: self.mini_core_every,
             mini_core_limit: self.mini_core_limit,
             diag_every: self.diag_every,
+            scaling_predictor: self.scaling_predictor,
             steps: self.steps,
             lr: self.lr,
             weight_decay: self.weight_decay,
