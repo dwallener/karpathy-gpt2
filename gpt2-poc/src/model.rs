@@ -25,6 +25,20 @@ pub struct RouterMetrics {
     pub gate_mass: Vec<f32>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct StateMetrics {
+    pub state_norm_mean: f32,
+    pub state_norm_std: f32,
+    pub delta_state_norm: f32,
+    pub state_to_prev_ratio: f32,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ModelMetrics {
+    pub router: RouterMetrics,
+    pub state: StateMetrics,
+}
+
 impl Operator {
     fn new(
         vb: VarBuilder<'_>,
@@ -57,6 +71,7 @@ pub struct OperatorStateLM {
     candidate_proj: Linear,
     candidate_norm: RmsNorm,
     readout_norm: LayerNorm,
+    readout_residual_proj: Linear,
     readout_proj: Linear,
 }
 
@@ -116,6 +131,11 @@ impl OperatorStateLM {
             nn::rms_norm(config.d_state, config.layer_norm_eps, vb.pp("candidate_norm"))?;
         let readout_norm =
             nn::layer_norm(config.d_state, config.layer_norm_eps, vb.pp("readout_norm"))?;
+        let readout_residual_proj = nn::linear(
+            config.d_model,
+            config.d_state,
+            vb.pp("readout_residual_proj"),
+        )?;
         let readout_proj = nn::linear(config.d_state, config.vocab_size, vb.pp("readout_proj"))?;
 
         Ok(Self {
@@ -131,6 +151,7 @@ impl OperatorStateLM {
             candidate_proj,
             candidate_norm,
             readout_norm,
+            readout_residual_proj,
             readout_proj,
         })
     }
@@ -140,15 +161,22 @@ impl OperatorStateLM {
         Ok((logits, state))
     }
 
-    pub fn forward_with_metrics(&self, xs: &Tensor) -> Result<(Tensor, Tensor, RouterMetrics)> {
+    pub fn forward_with_metrics(&self, xs: &Tensor) -> Result<(Tensor, Tensor, ModelMetrics)> {
         let (batch_size, seq_len) = xs.dims2()?;
         let mut state = Tensor::zeros((batch_size, self.config.d_state), self.dtype, xs.device())?;
+        let mut prev_norms = vec![0f32; batch_size];
         let embeddings = self.token_embedding.forward(xs)?;
         let mut logits_steps = Vec::with_capacity(seq_len);
         let mut usage_counts = vec![0usize; self.config.num_operators];
         let mut gate_mass = vec![0f32; self.config.num_operators];
         let mut total_route_entropy = 0f32;
         let mut route_rows = 0usize;
+        let mut sum_state_norm = 0f32;
+        let mut sum_state_norm_sq = 0f32;
+        let mut sum_delta_state_norm = 0f32;
+        let mut sum_state_ratio = 0f32;
+        let mut state_samples = 0usize;
+        let mut ratio_samples = 0usize;
 
         for t in 0..seq_len {
             let e_t = embeddings.i((.., t, ..))?.contiguous()?;
@@ -206,10 +234,28 @@ impl OperatorStateLM {
             let carry = f_t.broadcast_mul(&state)?;
             let write = w_t.broadcast_mul(&h_t)?;
             state = carry.broadcast_add(&write)?;
+            let state_norms = state
+                .sqr()?
+                .sum(1)?
+                .sqrt()?
+                .to_dtype(DType::F32)?
+                .to_vec1::<f32>()?;
+            for (current, previous) in state_norms.iter().zip(prev_norms.iter()) {
+                sum_state_norm += *current;
+                sum_state_norm_sq += current * current;
+                state_samples += 1;
+                if *previous > 1e-6 {
+                    sum_delta_state_norm += (current - previous).abs();
+                    sum_state_ratio += current / previous;
+                    ratio_samples += 1;
+                }
+            }
+            prev_norms = state_norms;
 
+            let readout_state = state.broadcast_add(&self.readout_residual_proj.forward(&e_t)?)?;
             let logits_t = self
                 .readout_proj
-                .forward(&self.readout_norm.forward(&state)?)?;
+                .forward(&self.readout_norm.forward(&readout_state)?)?;
             logits_steps.push(logits_t);
         }
 
@@ -239,15 +285,45 @@ impl OperatorStateLM {
             0.0
         };
 
+        let state_norm_mean = if state_samples > 0 {
+            sum_state_norm / state_samples as f32
+        } else {
+            0.0
+        };
+        let state_norm_var = if state_samples > 0 {
+            (sum_state_norm_sq / state_samples as f32) - state_norm_mean * state_norm_mean
+        } else {
+            0.0
+        };
+        let state_norm_std = state_norm_var.max(0.0).sqrt();
+        let delta_state_norm = if ratio_samples > 0 {
+            sum_delta_state_norm / ratio_samples as f32
+        } else {
+            0.0
+        };
+        let state_to_prev_ratio = if ratio_samples > 0 {
+            sum_state_ratio / ratio_samples as f32
+        } else {
+            0.0
+        };
+
         Ok((
             logits,
             state,
-            RouterMetrics {
+            ModelMetrics {
+                router: RouterMetrics {
                 routing_entropy,
                 max_operator_share,
                 num_active_operators,
                 operator_usage,
                 gate_mass,
+            },
+                state: StateMetrics {
+                    state_norm_mean,
+                    state_norm_std,
+                    delta_state_norm,
+                    state_to_prev_ratio,
+                },
             },
         ))
     }

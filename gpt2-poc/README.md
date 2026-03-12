@@ -317,7 +317,7 @@ The trainer now records per-step curve points, BPB estimates, router-utilization
 Stored per-step fields:
 
 ```json
-{"step":100,"tokens_seen":102400,"elapsed_sec":168.99,"train_loss":8.25,"val_loss":null,"train_bpb":11.90,"val_bpb":null,"router":{"routing_entropy":1.22,"max_operator_share":0.31,"num_active_operators":8,"operator_usage":[0.31,0.18,0.14,0.10,0.09,0.08,0.06,0.04],"gate_mass":[0.29,0.19,0.15,0.11,0.09,0.08,0.06,0.03]},"mini_core":0.0}
+{"step":100,"tokens_seen":102400,"elapsed_sec":168.99,"train_loss":8.25,"val_loss":null,"train_bpb":11.90,"val_bpb":null,"router":{"routing_entropy":1.22,"max_operator_share":0.31,"num_active_operators":8,"operator_usage":[0.31,0.18,0.14,0.10,0.09,0.08,0.06,0.04],"gate_mass":[0.29,0.19,0.15,0.11,0.09,0.08,0.06,0.03]},"state":{"state_norm_mean":12.4,"state_norm_std":1.1,"delta_state_norm":0.42,"state_to_prev_ratio":1.03},"mini_core":0.0}
 ```
 
 Diagnostics trigger:
@@ -345,6 +345,10 @@ router_max_share=0.310000
 router_active_ops=8
 router_usage=0:0.310 1:0.180 2:0.140 3:0.100 4:0.090 5:0.080 6:0.060 7:0.040
 router_gate_mass=0:0.290 1:0.190 2:0.150 3:0.110 4:0.090 5:0.080 6:0.060 7:0.030
+state_norm_mean=12.400000
+state_norm_std=1.100000
+delta_state_norm=0.420000
+state_to_prev_ratio=1.030000
 
 Loss / BPB vs Tokens (log scale)
 

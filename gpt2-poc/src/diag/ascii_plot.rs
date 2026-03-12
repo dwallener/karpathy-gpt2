@@ -1,5 +1,5 @@
 use crate::diag::scaling_predictor::{ScalingPrediction, compute_learning_slope, predict_final_loss};
-use crate::train_stats::{RouterMetricPoint, TrainPoint, TrainStats};
+use crate::train_stats::{RouterMetricPoint, StateMetricPoint, TrainPoint, TrainStats};
 
 const WIDTH: usize = 72;
 const HEIGHT: usize = 16;
@@ -16,6 +16,7 @@ pub struct DiagnosticsReport {
     pub latest_mini_core: Option<f32>,
     pub learning_slope: f32,
     pub router: RouterMetricPoint,
+    pub state: StateMetricPoint,
     pub tokens_per_second: f32,
     pub tokens_per_hour: f32,
     pub scaling_prediction: Option<ScalingPrediction>,
@@ -38,6 +39,7 @@ pub fn build_diagnostics(stats: &TrainStats) -> Option<DiagnosticsReport> {
         latest_mini_core: latest.mini_core,
         learning_slope: compute_learning_slope(points),
         router: latest.router.clone(),
+        state: latest.state.clone(),
         tokens_per_second: latest.tokens_seen as f32 / elapsed_sec,
         tokens_per_hour: latest.tokens_seen as f32 / elapsed_sec * 3600.0,
         scaling_prediction: predict_final_loss(stats),

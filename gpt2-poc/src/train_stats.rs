@@ -14,6 +14,14 @@ pub struct RouterMetricPoint {
     pub gate_mass: Vec<f32>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct StateMetricPoint {
+    pub state_norm_mean: f32,
+    pub state_norm_std: f32,
+    pub delta_state_norm: f32,
+    pub state_to_prev_ratio: f32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrainPoint {
     pub step: u64,
@@ -29,6 +37,8 @@ pub struct TrainPoint {
     pub val_bpb: Option<f32>,
     #[serde(default)]
     pub router: RouterMetricPoint,
+    #[serde(default)]
+    pub state: StateMetricPoint,
     #[serde(default)]
     pub mini_core: Option<f32>,
 }

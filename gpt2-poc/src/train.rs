@@ -15,7 +15,7 @@ use crate::diag::token_entropy::ascii_rank_plot;
 use crate::eval::run_mini_core;
 use crate::model::{build_model, cross_entropy_loss};
 use crate::stream_dataset::StreamDataset;
-use crate::train_stats::{RouterMetricPoint, TrainPoint, TrainStats};
+use crate::train_stats::{RouterMetricPoint, StateMetricPoint, TrainPoint, TrainStats};
 use crate::utils::{format_float, write_json_pretty};
 
 pub fn train_main(
@@ -80,7 +80,7 @@ pub fn train_main(
         let batch_wait_ms = batch_wait_start.elapsed().as_secs_f64() * 1_000.0;
 
         let step_start = Instant::now();
-        let (logits, _, router_metrics) = model.forward_with_metrics(&batch.xs)?;
+        let (logits, _, model_metrics) = model.forward_with_metrics(&batch.xs)?;
         let loss = cross_entropy_loss(&logits, &batch.ys)?;
 
         let mut grads = loss.backward()?;
@@ -162,11 +162,17 @@ pub fn train_main(
             train_bpb: train_bpb as f32,
             val_bpb: val_bpb.map(|value| value as f32),
             router: RouterMetricPoint {
-                routing_entropy: router_metrics.routing_entropy,
-                max_operator_share: router_metrics.max_operator_share,
-                num_active_operators: router_metrics.num_active_operators,
-                operator_usage: router_metrics.operator_usage,
-                gate_mass: router_metrics.gate_mass,
+                routing_entropy: model_metrics.router.routing_entropy,
+                max_operator_share: model_metrics.router.max_operator_share,
+                num_active_operators: model_metrics.router.num_active_operators,
+                operator_usage: model_metrics.router.operator_usage,
+                gate_mass: model_metrics.router.gate_mass,
+            },
+            state: StateMetricPoint {
+                state_norm_mean: model_metrics.state.state_norm_mean,
+                state_norm_std: model_metrics.state.state_norm_std,
+                delta_state_norm: model_metrics.state.delta_state_norm,
+                state_to_prev_ratio: model_metrics.state.state_to_prev_ratio,
             },
             mini_core: None,
         });
@@ -498,6 +504,22 @@ fn print_training_diagnostics(
     println!(
         "router_gate_mass={}",
         format_router_vector(&report.router.gate_mass)
+    );
+    println!(
+        "state_norm_mean={}",
+        format_float(report.state.state_norm_mean as f64)
+    );
+    println!(
+        "state_norm_std={}",
+        format_float(report.state.state_norm_std as f64)
+    );
+    println!(
+        "delta_state_norm={}",
+        format_float(report.state.delta_state_norm as f64)
+    );
+    println!(
+        "state_to_prev_ratio={}",
+        format_float(report.state.state_to_prev_ratio as f64)
     );
     if let Some(warning) = router_collapse_warning(&report.router) {
         println!("WARNING: {warning}");
