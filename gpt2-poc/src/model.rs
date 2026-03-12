@@ -1,6 +1,6 @@
 use anyhow::{Result, bail};
 use candle_core::{DType, Device, IndexOp, Tensor};
-use candle_nn::{self as nn, Embedding, LayerNorm, Linear, Module, VarBuilder, VarMap};
+use candle_nn::{self as nn, Embedding, LayerNorm, Linear, Module, RmsNorm, VarBuilder, VarMap};
 
 use crate::config::Config;
 
@@ -51,8 +51,11 @@ pub struct OperatorStateLM {
     router_norm: LayerNorm,
     router_proj: Linear,
     operators: Vec<Operator>,
-    gate_proj: Linear,
+    reset_proj: Linear,
+    forget_proj: Linear,
+    write_proj: Linear,
     candidate_proj: Linear,
+    candidate_norm: RmsNorm,
     readout_norm: LayerNorm,
     readout_proj: Linear,
 }
@@ -89,16 +92,28 @@ impl OperatorStateLM {
             )?);
         }
 
-        let gate_proj = nn::linear(
+        let reset_proj = nn::linear(
             config.state_update_dim(),
             config.d_state,
-            vb.pp("gate_proj"),
+            vb.pp("reset_proj"),
+        )?;
+        let forget_proj = nn::linear(
+            config.state_update_dim(),
+            config.d_state,
+            vb.pp("forget_proj"),
+        )?;
+        let write_proj = nn::linear(
+            config.state_update_dim(),
+            config.d_state,
+            vb.pp("write_proj"),
         )?;
         let candidate_proj = nn::linear(
             config.candidate_dim(),
             config.d_state,
             vb.pp("candidate_proj"),
         )?;
+        let candidate_norm =
+            nn::rms_norm(config.d_state, config.layer_norm_eps, vb.pp("candidate_norm"))?;
         let readout_norm =
             nn::layer_norm(config.d_state, config.layer_norm_eps, vb.pp("readout_norm"))?;
         let readout_proj = nn::linear(config.d_state, config.vocab_size, vb.pp("readout_proj"))?;
@@ -110,8 +125,11 @@ impl OperatorStateLM {
             router_norm,
             router_proj,
             operators,
-            gate_proj,
+            reset_proj,
+            forget_proj,
+            write_proj,
             candidate_proj,
+            candidate_norm,
             readout_norm,
             readout_proj,
         })
@@ -176,14 +194,17 @@ impl OperatorStateLM {
             }
 
             let gate_input = Tensor::cat(&[&state, &mixed, &e_t], 1)?;
-            let z_t = nn::ops::sigmoid(&self.gate_proj.forward(&gate_input)?)?;
+            let r_t = nn::ops::sigmoid(&self.reset_proj.forward(&gate_input)?)?;
+            let f_t = nn::ops::sigmoid(&self.forget_proj.forward(&gate_input)?)?;
+            let w_t = nn::ops::sigmoid(&self.write_proj.forward(&gate_input)?)?;
+            let reset_state = r_t.broadcast_mul(&state)?;
             let h_t = self
                 .candidate_proj
-                .forward(&Tensor::cat(&[&mixed, &e_t], 1)?)?
+                .forward(&Tensor::cat(&[&reset_state, &mixed, &e_t], 1)?)?
                 .tanh()?;
-            let one = Tensor::ones(z_t.shape(), z_t.dtype(), z_t.device())?;
-            let carry = one.broadcast_sub(&z_t)?.broadcast_mul(&state)?;
-            let write = z_t.broadcast_mul(&h_t)?;
+            let h_t = self.candidate_norm.forward(&h_t)?;
+            let carry = f_t.broadcast_mul(&state)?;
+            let write = w_t.broadcast_mul(&h_t)?;
             state = carry.broadcast_add(&write)?;
 
             let logits_t = self

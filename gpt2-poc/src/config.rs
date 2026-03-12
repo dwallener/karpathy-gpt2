@@ -23,6 +23,10 @@ impl Config {
     }
 
     pub fn candidate_dim(&self) -> usize {
+        self.state_update_dim()
+    }
+
+    pub fn readout_input_dim(&self) -> usize {
         self.d_state + self.d_model
     }
 }
